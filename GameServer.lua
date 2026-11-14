@@ -341,7 +341,7 @@ local function deco(props)
 	return part(props)
 end
 
--- ОСВЕЩЕНИЕ: золотой час, дымка, блум
+-- ОСВЕЩЕНИЕ: базовые эффекты; значения под каждую карту выставляет applyTheme ниже
 for _, c in ipairs(Lighting:GetChildren()) do
 	if c:IsA("PostEffect") or c:IsA("Atmosphere") then c:Destroy() end
 end
@@ -354,9 +354,9 @@ Lighting.EnvironmentDiffuseScale = 1
 Lighting.EnvironmentSpecularScale = 1
 Lighting.GlobalShadows = true
 Lighting.ShadowSoftness = 0.3
-make("Atmosphere", Lighting, { Density = 0.28, Offset = 0.2, Color = rgb(255, 205, 165), Decay = rgb(120, 90, 110), Glare = 0.4, Haze = 1.6 })
-make("BloomEffect", Lighting, { Intensity = 0.6, Size = 28, Threshold = 1.1 })
-make("ColorCorrectionEffect", Lighting, { Contrast = 0.12, Saturation = 0.15, TintColor = rgb(255, 244, 232) })
+local atmosphere = make("Atmosphere", Lighting, { Density = 0.28, Offset = 0.2, Color = rgb(255, 205, 165), Decay = rgb(120, 90, 110), Glare = 0.4, Haze = 1.6 })
+local bloom = make("BloomEffect", Lighting, { Intensity = 0.6, Size = 28, Threshold = 1.1 })
+local grade = make("ColorCorrectionEffect", Lighting, { Contrast = 0.12, Saturation = 0.15, TintColor = rgb(255, 244, 232) })
 make("SunRaysEffect", Lighting, { Intensity = 0.08, Spread = 0.8 })
 
 -- ВОДА И БЕРЕГА (Terrain: настоящая вода с волнами и отражениями, скалы, холмы)
@@ -367,7 +367,7 @@ terrain.WaterTransparency = 0.55
 terrain.WaterWaveSize = 0.3
 terrain.WaterWaveSpeed = 12
 terrain:FillBlock(CFrame.new(L / 2, -2, 0), V(2400, 12, 2400), M.Water)
-make("Clouds", terrain, { Cover = 0.55, Density = 0.6, Color = rgb(255, 225, 205) })
+local clouds = make("Clouds", terrain, { Cover = 0.55, Density = 0.6, Color = rgb(255, 225, 205) })
 
 -- дальний пейзаж всегда загружен, даже при включённом StreamingEnabled
 local scenery = Instance.new("Model")
@@ -386,6 +386,14 @@ for i = -1, 1 do
 end
 
 local rng = Random.new(7)
+-- участки берега под постройки: здесь нет деревьев, а холмы срезаются { x0, x1, z0, z1 }
+local RESERVED = { { -250, -110, 112, 228 }, { L + 14, L + 86, 36, 66 }, { L + 14, L + 86, -66, -36 }, { -42, 2, -312, -268 } }
+local function reserved(pos)
+	for _, r in ipairs(RESERVED) do
+		if pos.X > r[1] and pos.X < r[2] and pos.Z > r[3] and pos.Z < r[4] then return true end
+	end
+	return false
+end
 local function tree(pos, s)
 	local o = CFrame.new(pos)
 	piece(map, o, "Cylinder", V(6 * s, 1.2 * s, 1.2 * s), CFrame.new(0, 3 * s, 0) * UP, rgb(95, 65, 40), M.Wood)
@@ -399,8 +407,17 @@ for _, shore in ipairs({ { -500, 16, -320, -20 }, { L - 16, L + 500, L + 20, L +
 	for i = 1, 8 do
 		local side = i % 2 == 0 and 1 or -1
 		terrain:FillBall(V(rng:NextNumber(a + 60, b - 60), 92, side * rng:NextNumber(190, 300)), rng:NextNumber(40, 75), i % 3 == 0 and M.Rock or M.Grass)
-		tree(V(rng:NextNumber(shore[3], shore[4]), Y - 4, side * rng:NextNumber(45, 110)), rng:NextNumber(0.9, 1.6))
+		local spot, scale = V(rng:NextNumber(shore[3], shore[4]), Y - 4, side * rng:NextNumber(45, 110)), rng:NextNumber(0.9, 1.6)
+		if not reserved(spot) then tree(spot, scale) end
 	end
+	-- береговая линия: скальные осыпи у подножия обрыва
+	for i = 1, 7 do
+		local edge = shore[1] < 0 and b or a
+		terrain:FillBall(V(edge + rng:NextNumber(-10, 10), rng:NextNumber(0, 14), rng:NextNumber(-300, 300)), rng:NextNumber(14, 30), M.Rock)
+	end
+end
+for _, r in ipairs(RESERVED) do -- ровные площадки под постройки
+	terrain:FillBlock(CFrame.new((r[1] + r[2]) / 2, Y - 4 + 44, (r[3] + r[4]) / 2), V(r[2] - r[1], 88, r[4] - r[3]), M.Air)
 end
 
 -- под лобби, вышкой и подъездными дорогами — голый грунт, чтобы трава не прорастала сквозь покрытие
@@ -408,23 +425,55 @@ terrain:FillBlock(CFrame.new(-60, 94, 0), V(72, 4, 72), M.Ground)
 terrain:FillBlock(CFrame.new(-6, 94, -36), V(44, 4, 104), M.Ground)
 terrain:FillBlock(CFrame.new(L + 42, 94, 0), V(116, 4, 56), M.Ground)
 
--- горы на горизонте
-for i = 1, 12 do
-	local ang = i / 12 * math.pi * 2 + rng:NextNumber(-0.15, 0.15)
-	local dist, w, h = rng:NextNumber(2300, 2700), rng:NextNumber(700, 1300), rng:NextNumber(250, 520)
+-- горы на горизонте: ближний пояс и дальний, более высокий, со снежными шапками
+local MOUNTAIN = { Name = "Mountain", CanTouch = false, CanQuery = false, CastShadow = false }
+local FAR_MOUNTAIN = { Name = "FarMountain", CanTouch = false, CanQuery = false, CastShadow = false }
+for i = 1, 18 do
+	local far = i > 12
+	local ang = i / (far and 6 or 12) * math.pi * 2 + rng:NextNumber(-0.15, 0.15)
+	local dist = far and rng:NextNumber(3300, 3700) or rng:NextNumber(2300, 2700)
+	local w, h = rng:NextNumber(700, 1300) * (far and 1.5 or 1), rng:NextNumber(250, 520) * (far and 1.8 or 1)
 	local o = CFrame.new(L / 2 + math.cos(ang) * dist, 0, math.sin(ang) * dist) * CFrame.Angles(0, math.pi / 2 - ang + rng:NextNumber(-0.3, 0.3), 0)
 	for _, r in ipairs({ 0, math.pi }) do
-		piece(scenery, o, "Wedge", V(w, h, w * 0.35), CFrame.Angles(0, r, 0) * CFrame.new(0, h / 2, -w * 0.175), rgb(70, 80, 95), M.Slate, GHOST)
+		local side = CFrame.Angles(0, r, 0)
+		piece(scenery, o, "Wedge", V(w, h, w * 0.35), side * CFrame.new(0, h / 2, -w * 0.175), rgb(70, 80, 95), M.Slate, far and FAR_MOUNTAIN or MOUNTAIN)
+		if far then -- снежная шапка: верхняя треть хребта
+			piece(scenery, o, "Wedge", V(w * 1.002, h * 0.3, w * 0.11), side * CFrame.new(0, h * 0.85 + 3, -w * 0.055), WHITE, M.Snow, GHOST)
+		end
 	end
 end
 
--- город за финишем
-for i = 1, 14 do
-	local h, w = rng:NextNumber(110, 320), rng:NextNumber(36, 64)
-	local pos = V(rng:NextNumber(L + 230, L + 470), Y - 4 + h / 2, (i % 2 == 0 and 1 or -1) * rng:NextNumber(50, 260))
-	deco{ Name = "Skyscraper", Size = V(w, h, w), Position = pos, Color = rgb(35, 45, 65), Material = M.Glass, Reflectance = 0.35, Parent = scenery }
-	deco{ Name = "Glow", Size = V(w + 0.4, 3, w + 0.4), Position = pos + V(0, h / 2 - 6, 0), Color = ({ CYAN, ORANGE, rgb(200, 90, 255) })[i % 3 + 1], Material = M.Neon, Parent = scenery }
+-- ГОРОД за финишем: бульвар по оси моста, небоскрёбы с уступами по сторонам, три высотки-доминанты
+local SKY = { Name = "Skyscraper", Reflectance = 0.35, CanTouch = false, CanQuery = false, CastShadow = false }
+local GLOWS = { CYAN, ORANGE, rgb(200, 90, 255) }
+local function skyscraper(x, z, w, h, glow, spire)
+	local o = CFrame.new(x, Y - 4, z)
+	piece(scenery, o, "Block", V(w, h * 0.6, w), CFrame.new(0, h * 0.3, 0), rgb(35, 45, 65), M.Glass, SKY)
+	piece(scenery, o, "Block", V(w * 0.78, h * 0.3, w * 0.78), CFrame.new(0, h * 0.75, 0), rgb(35, 45, 65), M.Glass, SKY)
+	piece(scenery, o, "Block", V(w * 0.5, h * 0.1, w * 0.5), CFrame.new(0, h * 0.95, 0), rgb(35, 45, 65), M.Glass, SKY)
+	piece(scenery, o, "Block", V(w + 0.6, 2.5, w + 0.6), CFrame.new(0, h * 0.6 - 1.5, 0), glow, M.Neon, GHOST)
+	piece(scenery, o, "Block", V(w * 0.78 + 0.6, 2, w * 0.78 + 0.6), CFrame.new(0, h * 0.9 - 1.2, 0), glow, M.Neon, GHOST)
+	if spire then
+		piece(scenery, o, "Cylinder", V(h * 0.16, 1.4, 1.4), CFrame.new(0, h * 1.08, 0) * UP, STEEL, M.Metal, GHOST)
+		piece(scenery, o, "Ball", V(3, 3, 3), CFrame.new(0, h * 1.16 + 1, 0), RED, M.Neon, GHOST)
+	end
 end
+for i = 0, 3 do
+	for _, s in ipairs(SIDES) do
+		skyscraper(L + 240 + i * 62 + rng:NextNumber(-8, 8), s * rng:NextNumber(75, 130), rng:NextNumber(38, 56),
+			rng:NextNumber(130, 260), GLOWS[(i + (s > 0 and 1 or 0)) % 3 + 1], i % 2 == 0)
+	end
+end
+skyscraper(L + 455, -30, 70, 430, CYAN, true)
+skyscraper(L + 462, 100, 60, 350, GLOWS[3], true)
+skyscraper(L + 458, -165, 56, 310, ORANGE, true)
+for i = 1, 6 do -- малоэтажная набережная
+	local h = rng:NextNumber(22, 46)
+	deco{ Name = "Skyscraper", Size = V(rng:NextNumber(40, 64), h, 40), Position = V(L + 115 + (i - 1) % 3 * 48, Y - 4 + h / 2, (i > 3 and 1 or -1) * 200),
+		Color = rgb(35, 45, 65), Material = M.Glass, Reflectance = 0.25, Parent = scenery }
+end
+deco{ Name = "Boulevard", Size = V(330, 0.4, W), Position = V(L + 255, Y - 3.8, 0), Color = rgb(60, 60, 65), Material = M.Asphalt, Parent = scenery }
+deco{ Name = "BoulevardGlow", Size = V(330, 0.1, 0.8), Position = V(L + 255, Y - 3.55, 0), Color = CYAN, Material = M.Neon, Parent = scenery }
 
 -- ЛОББИ
 part{ Name = "Lobby", Size = V(60, 6, 60), Position = V(-60, Y - 3, 0), Color = rgb(90, 90, 100), Material = M.Concrete }
@@ -536,31 +585,220 @@ do
 	piece(map, o, "Block", V(0.1, 1.4, 3.4), CFrame.new(4.76, 66.5, 0), CYAN, M.Neon, GHOST)
 end
 
--- ПРЕПЯТСТВИЯ: пять видов, каждый занимает полосу поперёк дороги длиной len
+-- СТАРТОВАЯ ЗОНА: стартовая решётка и арка со светофором
+for _, x in ipairs({ 24, 36, 48 }) do
+	for _, s in ipairs(SIDES) do
+		deco{ Name = "Grid", Size = V(0.5, 0.05, 7), Position = V(x, Y + 0.03, s * 6), Color = WHITE }
+	end
+end
+for _, s in ipairs(SIDES) do
+	deco{ Name = "StartPost", Size = V(2, 14, 1.6), Position = V(58, Y + 7, s * (W / 2 + 0.6)), Color = DARK, Material = M.Metal, CastShadow = true }
+end
+deco{ Name = "StartBeam", Size = V(2, 2.5, W + 3), Position = V(58, Y + 13.5, 0), Color = DARK, Material = M.Metal, CastShadow = true }
+for i = -2, 2 do
+	deco{ Name = "StartLight", Size = V(2.2, 1.6, 1.6), Position = V(58, Y + 13.5, i * 5), Color = rgb(60, 255, 120), Material = M.Neon }
+end
+
+-- ФИНИШНАЯ ЗОНА: трибуны под навесом, экран, световые пилоны
+for _, s in ipairs(SIDES) do
+	local o = CFrame.new(L + 50, Y - 4, s * 44)
+	for k = 1, 3 do
+		piece(map, o, "Block", V(60, 4 * k, 5), CFrame.new(0, 2 * k, s * (k - 1) * 5), CONCRETE, M.Concrete, GHOST)
+	end
+	piece(map, o, "Block", V(62, 0.6, 18), CFrame.new(0, 17, s * 5), DARK, M.Metal, GHOST)
+	piece(map, o, "Block", V(60, 0.5, 0.5), CFrame.new(0, 16.5, s * -3.5), CYAN, M.Neon, GHOST)
+	for i = 0, 2 do
+		deco{ Name = "Pylon", Size = V(1.2, 12, 1.2), Position = V(L + 10 + i * 30, Y + 6, s * (W / 2 + 3)), Color = CYAN, Material = M.Neon }
+	end
+	deco{ Name = "ScreenPost", Size = V(1.5, 20, 1.5), Position = V(L + 88, Y + 10, s * (W / 2 + 3)), Color = DARK, Material = M.Metal }
+	deco{ Name = "Line", Size = V(90, 0.05, 0.4), Position = V(L + 45, Y + 0.03, s * 0.5), Color = rgb(235, 190, 40) }
+end
+local screen = deco{ Name = "Screen", Size = V(W + 8, 10, 1), CFrame = CFrame.lookAt(V(L + 88, Y + 15, 0), V(0, Y + 15, 0)), Color = BLACK, Material = M.Metal }
+make("TextLabel", make("SurfaceGui", screen, { Face = Enum.NormalId.Front, CanvasSize = Vector2.new(1000, 200), LightInfluence = 0 }),
+	{ Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = "FINISH", TextScaled = true, Font = Enum.Font.GothamBlack, TextColor3 = rgb(60, 255, 120) })
+
+-- ПОРТ у старта: штабеля контейнеров, козловой кран, склад (на берегу, в стороне от дороги)
+do
+	local o = CFrame.new(-236, Y - 4, 124)
+	for i = 0, 3 do
+		piece(map, o, "Block", V(24, 10, 9.5), CFrame.new(i * 27, 5, 0), PALETTE[i % #PALETTE + 1], M.Metal, GHOST)
+		piece(map, o, "Block", V(24, 10, 9.5), CFrame.new(i * 27, 5, 14), PALETTE[(i + 2) % #PALETTE + 1], M.Metal, GHOST)
+		if i < 3 then piece(map, o, "Block", V(24, 5, 9.5), CFrame.new(i * 27 + 4, 12.5, 0), PALETTE[(i + 3) % #PALETTE + 1], M.Metal, GHOST) end
+	end
+	for _, x in ipairs({ -6, 88 }) do
+		for _, z in ipairs({ -10, 26 }) do
+			piece(map, o, "Block", V(2.5, 44, 2.5), CFrame.new(x, 22, z), BRIDGE_RED, M.Metal, GHOST)
+		end
+	end
+	for _, z in ipairs({ -10, 26 }) do
+		piece(map, o, "Block", V(98, 3, 3), CFrame.new(41, 44.5, z), BRIDGE_RED, M.Metal, GHOST)
+	end
+	piece(map, o, "Block", V(8, 5, 38), CFrame.new(30, 43, 8), DARK, M.Metal, GHOST)
+	piece(map, o, "Cylinder", V(22, 0.4, 0.4), CFrame.new(30, 30, 8) * UP, DARK, M.Metal, GHOST)
+	piece(map, o, "Block", V(70, 20, 40), CFrame.new(40, 10, 70), rgb(70, 75, 85), M.Metal, GHOST)
+	piece(map, o, "Block", V(70.4, 1, 40.4), CFrame.new(40, 18, 70), CYAN, M.Neon, GHOST)
+end
+
+-- маяк на мысу и буи вдоль моста
+do
+	local o = CFrame.new(-20, Y - 4, -290)
+	piece(map, o, "Cylinder", V(50, 9, 9), CFrame.new(0, 25, 0) * UP, WHITE, M.Concrete, GHOST)
+	piece(map, o, "Cylinder", V(8, 9.4, 9.4), CFrame.new(0, 30, 0) * UP, RED, M.Concrete, GHOST)
+	local beam = piece(map, o, "Ball", V(8, 8, 8), CFrame.new(0, 53, 0), rgb(255, 225, 170), M.Neon, GHOST)
+	make("PointLight", beam, { Color = rgb(255, 225, 170), Range = 60, Brightness = 3 })
+	piece(map, o, "Cylinder", V(2, 11, 11), CFrame.new(0, 58, 0) * UP, RED, M.Metal, GHOST)
+end
+for x = 150, L - 150, 300 do
+	for _, s in ipairs(SIDES) do
+		piece(scenery, CFrame.new(x, 4.5, s * 90), "Ball", V(3, 3, 3), CFrame.identity, ORANGE, M.Neon, GHOST)
+	end
+end
+
+-- ТЕМЫ КАРТ. Геометрия берегов и моста общая; тема меняет свет, воду, цвета и свой набор декораций.
+local LAMP = rgb(255, 225, 170)
+local decor = Instance.new("Model")
+decor.Name = "ThemeDecor"
+decor.ModelStreamingMode = Enum.ModelStreamingMode.Persistent
+decor.Parent = map
+
+local function billboard(pos, text, color)
+	local b = piece(decor, CFrame.lookAt(pos, pos - Vector3.xAxis), "Block", V(64, 22, 1), CFrame.identity, BLACK, M.Metal, GHOST)
+	make("TextLabel", make("SurfaceGui", b, { Face = Enum.NormalId.Front, CanvasSize = Vector2.new(800, 275), LightInfluence = 0, Brightness = 2 }),
+		{ Size = UDim2.fromScale(1, 1), BackgroundTransparency = 1, Text = text, TextScaled = true, Font = Enum.Font.GothamBlack, TextColor3 = color })
+end
+
+local THEMES = {
+	{ name = "Закат над заливом", clock = 17.4, brightness = 2.4, ambient = rgb(70, 70, 90), outdoor = rgb(125, 115, 125),
+		atmosphere = { Density = 0.28, Offset = 0.2, Color = rgb(255, 205, 165), Decay = rgb(120, 90, 110), Glare = 0.4, Haze = 1.6 },
+		cloud = { 0.55, 0.6, rgb(255, 225, 205) }, bloom = 0.6, tint = rgb(255, 244, 232),
+		water = rgb(20, 75, 115), wave = { 0.3, 12 }, grass = rgb(106, 127, 63), rock = rgb(102, 108, 111), leaf = rgb(55, 115, 55),
+		steel = BRIDGE_RED, accent = CYAN, lamp = LAMP, lampPower = 2.2, sea = rgb(25, 80, 115), mountain = rgb(70, 80, 95), tower = rgb(35, 45, 65),
+		decor = function() -- парусники в заливе
+			for _, at in ipairs({ V(300, 4, -210), V(720, 4, 250), V(1010, 4, -330) }) do
+				local o = CFrame.new(at) * CFrame.Angles(0, at.X, 0)
+				piece(decor, o, "Block", V(5, 2.5, 16), CFrame.new(0, 1, 0), WHITE, nil, GHOST)
+				piece(decor, o, "Cylinder", V(20, 0.5, 0.5), CFrame.new(0, 12, -1) * UP, STEEL, M.Metal, GHOST)
+				piece(decor, o, "Wedge", V(0.3, 16, 9), CFrame.new(0, 11, 4), WHITE, M.Fabric, GHOST)
+			end
+		end },
+	{ name = "Неоновая ночь", clock = 0.5, brightness = 1.6, ambient = rgb(60, 58, 95), outdoor = rgb(80, 85, 125),
+		atmosphere = { Density = 0.22, Offset = 0.1, Color = rgb(95, 85, 150), Decay = rgb(45, 35, 85), Glare = 0, Haze = 1 },
+		cloud = { 0.3, 0.4, rgb(70, 70, 110) }, bloom = 0.9, tint = rgb(235, 235, 255),
+		water = rgb(15, 25, 60), wave = { 0.2, 9 }, grass = rgb(45, 65, 50), rock = rgb(62, 64, 78), leaf = rgb(35, 70, 55),
+		steel = rgb(45, 48, 60), accent = rgb(255, 60, 200), lamp = rgb(170, 220, 255), lampPower = 3.5, sea = rgb(12, 20, 50),
+		mountain = rgb(30, 32, 50), tower = rgb(20, 22, 40),
+		decor = function() -- рекламные экраны и лучи прожекторов над городом
+			billboard(V(L + 419, Y + 150, -30), "DRONE CHASE", rgb(255, 60, 200))
+			billboard(V(L + 431, Y + 110, 100), "NEON NIGHT", CYAN)
+			billboard(V(L + 429, Y + 90, -165), "24 / 7", ORANGE)
+			for _, s in ipairs(SIDES) do
+				piece(decor, CFrame.new(L + 330, Y + 200, s * 150) * CFrame.Angles(0, 0, math.pi / 2 + s * 0.35), "Cylinder", V(520, 7, 7),
+					CFrame.identity, rgb(170, 220, 255), M.Neon, { Transparency = 0.75, CanTouch = false, CanQuery = false, CastShadow = false })
+			end
+		end },
+	{ name = "Ледяной шторм", ice = true, clock = 9, brightness = 1.8, ambient = rgb(140, 150, 165), outdoor = rgb(150, 160, 175),
+		atmosphere = { Density = 0.42, Offset = 0.3, Color = rgb(215, 225, 235), Decay = rgb(170, 185, 200), Glare = 0, Haze = 2.4 },
+		cloud = { 0.9, 0.8, rgb(205, 212, 222) }, bloom = 0.4, tint = rgb(232, 242, 255),
+		water = rgb(70, 110, 130), wave = { 0.6, 18 }, grass = rgb(226, 233, 240), rock = rgb(150, 165, 180), leaf = rgb(215, 228, 235),
+		steel = rgb(205, 215, 225), accent = rgb(255, 150, 40), lamp = rgb(255, 240, 220), lampPower = 3, sea = rgb(80, 115, 135),
+		mountain = rgb(190, 200, 215), tower = rgb(120, 135, 150),
+		decor = function() -- айсберги вокруг моста
+			local r = Random.new(3)
+			for i = 1, 7 do
+				local o = CFrame.new(100 + i * 150, 3, (i % 2 == 0 and 1 or -1) * r:NextNumber(110, 420)) * CFrame.Angles(0, r:NextNumber(0, 6), 0)
+				local w = r:NextNumber(30, 70)
+				piece(decor, o, "Block", V(w, w * 0.5, w * 0.8), CFrame.Angles(0.15, 0, 0.1), rgb(205, 232, 245), M.Ice, GHOST)
+				piece(decor, o, "Wedge", V(w * 0.6, w * 0.7, w * 0.6), CFrame.new(0, w * 0.5, 0), rgb(225, 242, 250), M.Ice, GHOST)
+			end
+		end },
+}
+
+-- детали, которые перекрашивает тема, находим один раз по их исходным цветам и именам
+local themed = { steel = {}, accent = {}, lamp = {}, sea = {}, mountain = {}, far = {}, tower = {}, leaf = {} }
+for _, d in ipairs(map:GetDescendants()) do
+	if d:IsA("BasePart") then
+		local list
+		if d.Color == BRIDGE_RED then list = themed.steel
+		elseif d.Material == M.Neon and d.Color == CYAN then list = themed.accent
+		elseif d.Material == M.Neon and d.Color == LAMP then list = themed.lamp
+		elseif d.Material == M.LeafyGrass then list = themed.leaf
+		elseif d.Name == "Sea" then list = themed.sea
+		elseif d.Name == "Mountain" then list = themed.mountain
+		elseif d.Name == "FarMountain" then list = themed.far
+		elseif d.Name == "Skyscraper" then list = themed.tower end
+		if list then table.insert(list, d) end
+	end
+end
+
+local currentTheme = 0
+local function applyTheme(i)
+	if i == currentTheme then return end
+	currentTheme = i
+	local t = THEMES[i]
+	Lighting.ClockTime, Lighting.Brightness = t.clock, t.brightness
+	Lighting.Ambient, Lighting.OutdoorAmbient = t.ambient, t.outdoor
+	for k, v in pairs(t.atmosphere) do atmosphere[k] = v end
+	clouds.Cover, clouds.Density, clouds.Color = t.cloud[1], t.cloud[2], t.cloud[3]
+	bloom.Intensity = t.bloom
+	grade.TintColor = t.tint
+	terrain.WaterColor, terrain.WaterWaveSize, terrain.WaterWaveSpeed = t.water, t.wave[1], t.wave[2]
+	terrain:SetMaterialColor(M.Grass, t.grass)
+	terrain:SetMaterialColor(M.Rock, t.rock)
+	terrain:SetMaterialColor(M.Ground, t.rock:Lerp(t.grass, 0.3))
+	local colors = { steel = t.steel, accent = t.accent, lamp = t.lamp, sea = t.sea, mountain = t.mountain,
+		far = t.mountain:Lerp(t.atmosphere.Color, 0.45), tower = t.tower, leaf = t.leaf }
+	for key, list in pairs(themed) do
+		for _, p in ipairs(list) do p.Color = colors[key] end
+	end
+	for _, p in ipairs(themed.lamp) do
+		local light = p:FindFirstChildWhichIsA("Light")
+		if light then light.Color, light.Brightness = t.lamp, t.lampPower end
+	end
+	decor:ClearAllChildren()
+	t.decor()
+	folder:SetAttribute("Map", t.name)
+end
+applyTheme(1)
+
+-- ТРАССА: препятствия и игровые элементы. Раскладка каждой карты — список строк { вид, x, z, a, b }.
+-- Твёрдые: wreck, barrier, container, concrete, scaffold (a — длина поперёк дороги), wall (a×b — размер по X и Z).
+-- Проезжаемые: crates (разрушаемые ящики, a — длина ряда), ramp (трамплин, a — ширина), roof (навес туннеля),
+-- зоны fire / slick / boost (a×b — размер по X и Z).
 local obstacles = Instance.new("Folder")
 obstacles.Name = "Obstacles"
 obstacles.Parent = map
 
+local FIRE_DPS   = 40   -- урон в секунду на горящем участке
+local CRATE_SLOW = 0.82 -- множитель скорости при таране ящика
+
 local function jitter(range) return CFrame.Angles(0, (math.random() - 0.5) * range, 0) end
 
-local OBSTACLES = {
-	function(o) -- разбитый автомобиль
-		o = o * jitter(0.7)
+local function zone(o, lx, lz, kind, color, material, extra)
+	extra.CanTouch, extra.CanQuery, extra.CastShadow, extra.Name = false, false, false, "Zone"
+	local p = piece(obstacles, o, "Block", V(lx, 0.08, lz), CFrame.new(0, 0.05, 0), color, material, extra)
+	p:SetAttribute("Zone", kind) -- клиент беглеца читает зоны по тегу: занос, ускорение, толчок трамплина
+	CollectionService:AddTag(p, "TrackZone")
+	return p
+end
+
+local TRACK = {
+	wreck = function(o) -- разбитый автомобиль
+		o = o * jitter(0.3)
 		local col = part{ Name = "Block", Size = V(6.8, 3, 11.6), CFrame = o * CFrame.new(0, 1.5, 0), Transparency = 1, Parent = obstacles }
 		buildCarShell(obstacles, o * CFrame.new(0, 1, 0), PALETTE[math.random(#PALETTE)], true)
 		make("ParticleEmitter", make("Attachment", col, { Position = V(0, 0.7, -3.8) }), smokeProps(1.2, 3))
 	end,
-	function(o, len) -- дорожные барьеры
+	barrier = function(o, len) -- дорожные барьеры
 		local n = math.max(1, math.floor(len / 4.4))
 		for i = 1, n do
-			local c = o * CFrame.new(0, 0, (i - (n + 1) / 2) * 4.4) * jitter(0.25)
+			local c = o * CFrame.new(0, 0, (i - (n + 1) / 2) * 4.4) * jitter(0.15)
 			piece(obstacles, c, "Block", V(2.2, 1, 4.2), CFrame.new(0, 0.5, 0), CONCRETE, M.Concrete, SOLID)
 			piece(obstacles, c, "Block", V(1.1, 2.2, 4.2), CFrame.new(0, 2.1, 0), CONCRETE, M.Concrete, SOLID)
 			piece(obstacles, c, "Block", V(1.16, 0.5, 2.4), CFrame.new(0, 2.4, 0), i % 2 == 0 and WHITE or ORANGE, M.Neon)
 		end
 	end,
-	function(o, len) -- грузовой контейнер
-		o = o * jitter(0.4)
+	container = function(o, len) -- грузовой контейнер
+		o = o * jitter(0.15)
 		piece(obstacles, o, "Block", V(5, 5.4, len), CFrame.new(0, 2.7, 0), PALETTE[math.random(#PALETTE)], M.Metal, SOLID)
 		for _, s in ipairs(SIDES) do
 			for _, y in ipairs({ 0.2, 5.3 }) do
@@ -570,10 +808,10 @@ local OBSTACLES = {
 			piece(obstacles, o, "Cylinder", V(5, 0.16, 0.16), CFrame.new(s * 0.9, 2.7, len / 2 + 0.2) * UP, STEEL, M.Metal) -- запоры дверей
 		end
 	end,
-	function(o, len) -- бетонные блоки с арматурой
+	concrete = function(o, len) -- бетонные блоки с арматурой
 		local n = math.max(1, math.floor(len / 4))
 		for i = 1, n do
-			local c = o * CFrame.new(0, 0, (i - (n + 1) / 2) * 4.1) * jitter(0.4)
+			local c = o * CFrame.new(0, 0, (i - (n + 1) / 2) * 4.1) * jitter(0.2)
 			piece(obstacles, c, "Block", V(4, 2.6, 3.6), CFrame.new(0, 1.3, 0), CONCRETE, M.Concrete, SOLID)
 			if i % 2 == 1 then
 				piece(obstacles, c, "Block", V(3.4, 2, 3.2), CFrame.new(0, 3.6, 0) * jitter(0.6), rgb(140, 140, 135), M.Concrete, SOLID)
@@ -584,7 +822,7 @@ local OBSTACLES = {
 			end
 		end
 	end,
-	function(o, len) -- строительные леса с ограждением
+	scaffold = function(o, len) -- строительные леса с ограждением
 		part{ Name = "Block", Size = V(4, 6.4, len), CFrame = o * CFrame.new(0, 3.2, 0), Transparency = 1, Parent = obstacles }
 		for _, s in ipairs(SIDES) do
 			for _, sz in ipairs(SIDES) do
@@ -596,14 +834,188 @@ local OBSTACLES = {
 		piece(obstacles, o, "Block", V(0.3, 1, len), CFrame.new(-2.1, 1.4, 0), ORANGE)
 		piece(obstacles, o, "Block", V(0.34, 1.04, len / 3), CFrame.new(-2.1, 1.4, 0), WHITE)
 	end,
+	wall = function(o, lx, lz)
+		if math.min(lx, lz) <= 2.5 then -- длинная бетонная стена-разделитель
+			piece(obstacles, o, "Block", V(lx, 4, lz), CFrame.new(0, 2, 0), CONCRETE, M.Concrete, SOLID)
+			piece(obstacles, o, "Block", V(lx + 0.1, 0.5, lz + 0.1), CFrame.new(0, 3.2, 0), AMBER, M.Neon)
+			return
+		end
+		-- штабель контейнеров: секции вдоль длинной стороны, через одну — второй ярус
+		local alongX = lx >= lz
+		local long, short = math.max(lx, lz), math.min(lx, lz)
+		local n = math.max(1, math.floor(long / 13 + 0.5))
+		local seg = long / n
+		for i = 1, n do
+			local off = (i - (n + 1) / 2) * seg
+			local size = alongX and V(seg - 0.3, 5.4, short) or V(short, 5.4, seg - 0.3)
+			local at = alongX and CFrame.new(off, 2.7, 0) or CFrame.new(0, 2.7, off)
+			piece(obstacles, o, "Block", size, at, PALETTE[(i + n) % #PALETTE + 1], M.Metal, SOLID)
+			if i % 2 == 1 then
+				piece(obstacles, o, "Block", size * V(0.96, 1, 0.96), at * CFrame.new(0, 5.4, 0), PALETTE[(i + 2) % #PALETTE + 1], M.Metal, SOLID)
+			end
+		end
+	end,
+	roof = function(o, lx, lz) -- навес туннеля: машине и камере не мешает, но останавливает пули, бомбы и ракеты
+		local slab = piece(obstacles, o, "Block", V(lx, 0.6, lz), CFrame.new(0, 9, 0), DARK, M.Metal, { CanTouch = false })
+		make("SurfaceLight", slab, { Face = Enum.NormalId.Bottom, Range = 16, Angle = 120, Brightness = 1.5, Color = WHITE })
+		for _, sx in ipairs(SIDES) do
+			for _, sz in ipairs(SIDES) do
+				piece(obstacles, o, "Block", V(0.8, 9, 0.8), CFrame.new(sx * (lx / 2 - 0.5), 4.5, sz * (lz / 2 - 0.4)), DARK, M.Metal, GHOST)
+			end
+		end
+	end,
+	crates = function(o, lz, _, info) -- разрушаемые ящики и бочки: машина проламывает их с потерей скорости, оружие разбивает
+		local n = math.max(1, math.floor(lz / 3.7))
+		for i = 1, n do
+			local c = o * CFrame.new(i % 2 * 1.2 - 0.6, 0, (i - (n + 1) / 2) * 3.7) * jitter(0.5)
+			local p
+			if i % 3 == 0 then
+				p = piece(obstacles, c, "Cylinder", V(3.6, 2.6, 2.6), CFrame.new(0, 1.8, 0) * UP, rgb(190, 60, 50), M.Metal, { Name = "Crate", CanTouch = false })
+			else
+				p = piece(obstacles, c, "Block", V(3.3, 3.3, 3.3), CFrame.new(0, 1.65, 0), rgb(150, 110, 70), M.WoodPlanks, { Name = "Crate", CanTouch = false })
+				if i % 2 == 0 then
+					piece(p, c, "Block", V(2.6, 2.6, 2.6), CFrame.new(0, 4.6, 0) * jitter(0.8), rgb(165, 125, 80), M.WoodPlanks, { CanTouch = false })
+				end
+			end
+			p:SetAttribute("CrateHP", 3)
+			table.insert(info.crates, p)
+		end
+	end,
+	fire = function(o, lx, lz, info) -- горящий разлив топлива: урон, пока машина едет по нему
+		local plate = piece(obstacles, o, "Block", V(lx, 0.08, lz), CFrame.new(0, 0.05, 0), rgb(25, 18, 12), M.Slate, GHOST)
+		for i = 1, 6 do
+			local at = make("Attachment", plate, { Position = V((math.random() - 0.5) * (lx - 4), 0.2, (i - 3.5) / 3 * (lz / 2 - 3)) })
+			make("ParticleEmitter", at, { Texture = TEX.fire, Rate = 18, Lifetime = NumberRange.new(0.5, 0.9), Speed = NumberRange.new(6, 10),
+				Size = NumberSequence.new(4, 1), Transparency = NumberSequence.new(0.1, 1), Color = ColorSequence.new(rgb(255, 200, 80), rgb(220, 60, 20)),
+				LightEmission = 1, SpreadAngle = Vector2.new(20, 20) })
+		end
+		make("PointLight", plate, { Color = ORANGE, Range = 34, Brightness = 2 })
+		for _, s in ipairs(SIDES) do
+			piece(obstacles, o, "Block", V(0.5, 0.1, lz), CFrame.new(s * lx / 2, 0.08, 0), AMBER, M.Neon, GHOST)
+		end
+		table.insert(info.fires, { x0 = o.X - lx / 2, x1 = o.X + lx / 2, z0 = o.Z - lz / 2, z1 = o.Z + lz / 2 })
+	end,
+	slick = function(o, lx, lz, info) -- скользкий участок: масло или лёд, сцепление почти пропадает
+		local ice = info.theme.ice
+		zone(o, lx, lz, "slick", ice and rgb(190, 225, 245) or rgb(12, 12, 16), ice and M.Ice or M.SmoothPlastic, { Reflectance = 0.45 })
+	end,
+	boost = function(o, lx, lz) -- полоса ускорения
+		zone(o, lx, lz, "boost", rgb(170, 255, 60), M.Neon, { Transparency = 0.35 })
+		for _, dx in ipairs({ -0.2, 0.2 }) do
+			for _, s in ipairs(SIDES) do
+				piece(obstacles, o, "Block", V(0.5, 0.1, lz * 0.5), CFrame.new(dx * lx + s * 0, 0.12, s * lz * 0.2) * CFrame.Angles(0, s * 0.6, 0), WHITE, M.Neon, GHOST)
+			end
+		end
+	end,
+	ramp = function(o, lz) -- трамплин: клин поднимается по ходу движения, наверху зона толчка
+		piece(obstacles, o, "Wedge", V(lz, 2.8, 16), CFrame.new(8, 1.4, 0) * CFrame.Angles(0, math.pi / 2, 0), rgb(70, 72, 80), M.DiamondPlate, SOLID)
+		for _, s in ipairs(SIDES) do
+			piece(obstacles, o, "Block", V(16, 0.3, 0.5), CFrame.new(8, 1.5, s * lz / 2) * CFrame.Angles(0, 0, math.atan2(2.8, 16)), AMBER, M.Neon, GHOST)
+		end
+		local pad = zone(o * CFrame.new(14.5, 2.95, 0), 5, lz, "launch", rgb(170, 255, 60), M.Neon, { Transparency = 0.4 })
+		pad.Name = "Zone"
+	end,
 }
 
-local function buildObstacles()
+-- Раскладки проверены расчётом: основной путь, оба коридора каждой развилки и оба варианта каждого
+-- короткого пути проходимы для машины шириной 7 от старта до финиша.
+local TRACKS = {
+	{
+		{ "wreck", 120, -9 },
+		{ "container", 165, 8, 12 },
+		{ "concrete", 210, -12, 12 },
+		{ "scaffold", 255, 6, 10 },
+		{ "barrier", 300, -6, 13 },
+		{ "ramp", 350, 0, 14 },
+		{ "fire", 380, 0, 22, 44 },
+		{ "wall", 525, 0, 150, 2 },
+		{ "roof", 525, 11.25, 150, 21.5 },
+		{ "barrier", 495, 5.5, 9 },
+		{ "barrier", 555, 16.5, 9 },
+		{ "crates", 485, -11, 18 },
+		{ "boost", 525, -11, 16, 10 },
+		{ "crates", 565, -11, 18 },
+		{ "wall", 660, -9, 4, 26 },
+		{ "wall", 715, 9, 4, 26 },
+		{ "wall", 770, -9, 4, 26 },
+		{ "wall", 860, -14.5, 40, 15 },
+		{ "wall", 860, 5.75, 40, 6.5 },
+		{ "crates", 836, -2.25, 9.5 },
+		{ "boost", 860, -2.25, 30, 8 },
+		{ "wreck", 930, -9 },
+		{ "container", 975, 8, 12 },
+		{ "concrete", 1020, -12, 12 },
+		{ "scaffold", 1065, 6, 10 },
+		{ "barrier", 1110, -6, 13 },
+	},
+	{
+		{ "wall", 120, -9, 4, 26 },
+		{ "wall", 175, 9, 4, 26 },
+		{ "wall", 230, -9, 4, 26 },
+		{ "wall", 310, -14.5, 40, 15 },
+		{ "wall", 310, 5.75, 40, 6.5 },
+		{ "crates", 286, -2.25, 9.5 },
+		{ "boost", 310, -2.25, 30, 8 },
+		{ "wreck", 390, -9 },
+		{ "container", 435, 8, 12 },
+		{ "concrete", 480, -12, 12 },
+		{ "scaffold", 525, 6, 10 },
+		{ "barrier", 570, -6, 13 },
+		{ "wall", 705, 0, 150, 2 },
+		{ "roof", 705, 11.25, 150, 21.5 },
+		{ "barrier", 675, 5.5, 9 },
+		{ "barrier", 735, 16.5, 9 },
+		{ "crates", 665, -11, 18 },
+		{ "boost", 705, -11, 16, 10 },
+		{ "crates", 745, -11, 18 },
+		{ "ramp", 840, 0, 14 },
+		{ "fire", 870, 0, 22, 44 },
+		{ "slick", 980, 0, 80, 40 },
+		{ "concrete", 965, 9, 10 },
+		{ "concrete", 1000, -9, 10 },
+		{ "crates", 1070, -10, 22 },
+		{ "crates", 1095, 10, 22 },
+		{ "barrier", 1120, 0, 8 },
+	},
+	{
+		{ "slick", 150, 0, 80, 40 },
+		{ "concrete", 135, 9, 10 },
+		{ "concrete", 170, -9, 10 },
+		{ "wreck", 250, -9 },
+		{ "container", 295, 8, 12 },
+		{ "concrete", 340, -12, 12 },
+		{ "scaffold", 385, 6, 10 },
+		{ "barrier", 430, -6, 13 },
+		{ "ramp", 480, 0, 14 },
+		{ "fire", 510, 0, 22, 44 },
+		{ "wall", 580, -9, 4, 26 },
+		{ "wall", 635, 9, 4, 26 },
+		{ "wall", 690, -9, 4, 26 },
+		{ "slick", 790, 0, 80, 40 },
+		{ "concrete", 775, 9, 10 },
+		{ "concrete", 810, -9, 10 },
+		{ "wall", 955, 0, 150, 2 },
+		{ "roof", 955, 11.25, 150, 21.5 },
+		{ "barrier", 925, 5.5, 9 },
+		{ "barrier", 985, 16.5, 9 },
+		{ "crates", 915, -11, 18 },
+		{ "boost", 955, -11, 16, 10 },
+		{ "crates", 995, -11, 18 },
+		{ "wall", 1100, -14.5, 40, 15 },
+		{ "wall", 1100, 5.75, 40, 6.5 },
+		{ "crates", 1076, -2.25, 9.5 },
+		{ "boost", 1100, -2.25, 30, 8 },
+	},
+}
+
+-- Строит трассу карты trackIdx. mirror отражает её по ширине моста — для разнообразия без потери баланса.
+local function buildObstacles(trackIdx, mirror)
 	obstacles:ClearAllChildren()
-	for x = 120, BRIDGE_LEN - 60, 45 do
-		local z = math.random(-BRIDGE_WIDTH/2 + 6, BRIDGE_WIDTH/2 - 6)
-		OBSTACLES[math.random(#OBSTACLES)](CFrame.new(x, BRIDGE_Y, z), math.random(6, 14))
+	local info = { fires = {}, crates = {}, theme = THEMES[trackIdx] }
+	for _, row in ipairs(TRACKS[trackIdx]) do
+		TRACK[row[1]](CFrame.new(row[2], BRIDGE_Y, mirror and -row[3] or row[3]), row[4], row[5], info)
 	end
+	return info
 end
 
 ------------------------------------------------------------------ МАШИНА
@@ -951,6 +1363,39 @@ local function updateReload(r)
 	end
 end
 
+---------------------------------------------------------------- разрушаемые ящики
+local function crateOf(inst)
+	if inst:GetAttribute("CrateHP") then return inst end
+	local parent = inst.Parent
+	if parent and parent:IsA("BasePart") and parent:GetAttribute("CrateHP") then return parent end
+	return nil
+end
+
+local function breakCrate(c)
+	if not c.Parent then return end
+	local pos = c.Position
+	c:Destroy()
+	local a = fxPart("Block", V(1, 1, 1), CFrame.new(pos), WHITE, 2)
+	a.Transparency = 1
+	local dust = smokeProps(1.2, 90)
+	dust.Color, dust.SpreadAngle, dust.Speed = ColorSequence.new(rgb(160, 130, 95)), Vector2.new(180, 180), NumberRange.new(6, 14)
+	burst(a, dust)
+	sfx("crash", pos)
+end
+
+local function hitCrate(c, n)
+	local hp = c:GetAttribute("CrateHP") - n
+	if hp <= 0 then breakCrate(c) else c:SetAttribute("CrateHP", hp) end
+end
+
+-- расстояние в плоскости дороги от точки c до отрезка a–b (путь машины за шаг матча)
+local function segDist(c, a, b)
+	local ab = Vector3.new(b.X - a.X, 0, b.Z - a.Z)
+	local ac = Vector3.new(c.X - a.X, 0, c.Z - a.Z)
+	local t = ab.Magnitude > 0.01 and math.clamp(ac:Dot(ab) / ab:Dot(ab), 0, 1) or 0
+	return (ac - ab * t).Magnitude
+end
+
 ---------------------------------------------------------------- урон
 -- quiet = урон не от оружия (авария): охотнику маркер попадания не показываем
 local function damageCar(amount, pos, crit, quiet)
@@ -988,6 +1433,11 @@ local function explode(pos, radius, dmg, push)
 	end
 
 	local r = round
+	if r and dmg > 0 then -- взрыв разносит ящики в радиусе
+		for _, c in ipairs(r.track.crates) do
+			if c.Parent and (c.Position - pos).Magnitude <= radius then breakCrate(c) end
+		end
+	end
 	if dmg <= 0 or not r or not r.active or not r.body.Parent then return end
 	local body = r.body
 	local dist = carDistance(body, pos)
@@ -1188,6 +1638,8 @@ FireEv.OnServerEvent:Connect(function(plr, target)
 		sfx("shot", origin)
 		if res then
 			hitFx(res.Position, res.Normal)
+			local crate = crateOf(res.Instance) -- ящики прикрывают от пуль, пока не разбиты
+			if crate then hitCrate(crate, 1) end
 			-- скрытый водитель торчит над крышей: попадание в него тоже считается попаданием в машину
 			local driver = r.runner.Character
 			if res.Instance:IsDescendantOf(r.car) or (driver and res.Instance:IsDescendantOf(driver)) then
@@ -1341,10 +1793,13 @@ end
 -- бывший playRound, часть 1: строим сцену и раздаём управление
 function world.setup(match)
 	local hunter, runner = match.hunter, match.runner
-	buildObstacles()
+	-- карты идут по кругу; чётные матчи играются на зеркальной раскладке
+	local mapIdx = (match.id - 1) % #TRACKS + 1
+	applyTheme(mapIdx)
+	local track = buildObstacles(mapIdx, match.id % 2 == 0)
 	local carCfg = CARS[runner:GetAttribute("Car") or 1] or CARS[1]
 	local car, body, seat = buildCar(carCfg)
-	round = { id = match.id, hunter = hunter, runner = runner, car = car, body = body, seat = seat, carCfg = carCfg,
+	round = { id = match.id, hunter = hunter, runner = runner, car = car, body = body, seat = seat, carCfg = carCfg, track = track,
 		lastSpeed = 0, pushUntil = 0, startTime = os.clock(),
 		minTime = (BRIDGE_LEN - 50) / (carCfg.maxSpeed * 1.5), -- быстрее этого доехать до финиша физически нельзя
 		droneIdx = 1, switchEnd = 0, weapons = {}, ticks = 0, active = false }
@@ -1403,8 +1858,31 @@ function world.tick(match, left)
 	if r.drone then updateReload(r) end
 
 	local destroyed = r.car:GetAttribute("HP") <= 0
-	-- «упала» — это и падение с моста, и любой вылет за пределы карты из-за сбоя физики
 	local p = body.Position
+	if r.active then
+		-- опасные участки: пока машина едет по огню (не перелетает его), она получает урон
+		if p.Y < r.carCfg.roadY + 1.5 then
+			for _, f in ipairs(r.track.fires) do
+				if p.X > f.x0 and p.X < f.x1 and p.Z > f.z0 and p.Z < f.z1 then damageCar(FIRE_DPS * 0.1, p, false, true) end
+			end
+		end
+		-- ящики: машина проламывает их, теряя скорость
+		local crates, last, smashed = r.track.crates, r.lastPos or p, false
+		for i = #crates, 1, -1 do
+			local c = crates[i]
+			if not c.Parent then
+				table.remove(crates, i)
+			elseif segDist(c.Position, last, p) < 5 then
+				table.remove(crates, i)
+				breakCrate(c)
+				smashed = true
+			end
+		end
+		if smashed and r.runner.Parent then StateEv:FireClient(r.runner, "push", Vector3.zero, 0, CRATE_SLOW) end
+	end
+	r.lastPos = p
+
+	-- «упала» — это и падение с моста, и любой вылет за пределы карты из-за сбоя физики
 	local fell = body.Parent == nil or p ~= p or p.Y < BRIDGE_Y - 20 or p.Y > BRIDGE_Y + 80
 		or math.abs(p.Z) > 400 or p.X < -300 or p.X > BRIDGE_LEN + 400
 	-- финиш засчитывается, только если машина могла доехать за это время (защита от телепорта)

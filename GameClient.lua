@@ -37,6 +37,7 @@ local SOUNDS = {
 	warn         = { "rbxasset://sounds/electronicpingshort.wav", 0.6, 1 },
 	crash        = { "rbxasset://sounds/collide.wav", 0.9, 1.5 },
 	pick         = { "rbxasset://sounds/button.wav", 0.6, 1 },
+	boost        = { "rbxasset://sounds/swoosh.wav", 0.8, 1.4 },
 }
 
 ------------------------------------------------------------------ GUI
@@ -100,6 +101,7 @@ local msgLabel   = label(UDim2.new(0.5, 0, 0, 10), UDim2.fromOffset(620, 40), 20
 local timerLabel = label(UDim2.new(0.5, 0, 0, 56), UDim2.fromOffset(160, 30), 18)
 local helpLabel  = label(UDim2.new(0.5, 0, 1, -90), UDim2.fromOffset(600, 60), 16)
 helpLabel.Visible = false
+local mapLabel = label(UDim2.new(0.5, 0, 0, 106), UDim2.fromOffset(260, 22), 13) -- название текущей карты
 local progBg, progFill = bar(UDim2.new(0.5, 0, 0, 92), UDim2.fromOffset(400, 10), Color3.fromRGB(60, 220, 90))
 
 -- панель оружия охотника: три дрона, боезапас, полоса перезарядки
@@ -244,7 +246,7 @@ local conn = nil
 local drone, droneCfg = nil, nil
 local car = nil          -- машина, которой управляет этот игрок
 local carCfg = nil       -- её характеристики (от сервера)
-local drive = { speed = 0, lat = 0, hand = false } -- текущее движение для приборов
+local drive = { speed = 0, lat = 0, hand = false, zone = nil } -- текущее движение для приборов
 local pendingPush = nil  -- ударная волна от сервера, ещё не применённая к машине
 local hitUntil, lockNoteUntil, nextWarn = 0, 0, 0
 
@@ -396,7 +398,7 @@ local function startCar(model, cfg)
 	local params = RaycastParams.new()
 	params.FilterDescendantsInstances = { car, player.Character }
 	params.FilterType = Enum.RaycastFilterType.Exclude
-	local yawRate = 0
+	local yawRate, launchAt, boostAt = 0, 0, 0
 	conn = RunService.Heartbeat:Connect(function(dt)
 		if not body.Parent then stopControl() return end
 		dt = math.min(dt, 0.05) -- провал FPS не должен превращаться в рывок
@@ -414,6 +416,17 @@ local function startCar(model, cfg)
 		-- сильно повреждённая машина теряет в максимальной скорости
 		local hpK = (car:GetAttribute("HP") or 100) / (car:GetAttribute("MaxHP") or 100)
 		local top = cfg.maxSpeed * (hpK < 0.2 and 0.85 or hpK < 0.4 and 0.93 or 1)
+
+		-- зоны трассы под машиной: скользкий участок, полоса ускорения, толчок трамплина
+		local slick, boost, launch = false, false, false
+		for _, z in ipairs(CollectionService:GetTagged("TrackZone")) do
+			local d = pos - z.Position
+			if math.abs(d.X) <= z.Size.X / 2 and math.abs(d.Z) <= z.Size.Z / 2 then
+				local kind = z:GetAttribute("Zone")
+				slick, boost, launch = slick or kind == "slick", boost or kind == "boost", launch or kind == "launch"
+			end
+		end
+		drive.zone = boost and "НИТРО" or slick and "СКОЛЬЗКО" or nil
 
 		local bump = 0
 		if workspace:Raycast(pos, Vector3.new(0, -2.2, 0), params) then -- колёса на земле
@@ -438,11 +451,18 @@ local function startCar(model, cfg)
 			-- сцепление: чем быстрее и чем круче руль, тем сильнее сносит; на ручнике задняя ось срывается
 			local speedK = math.clamp(math.abs(fwd) / top, 0, 1)
 			local grip = hand and cfg.driftGrip or cfg.grip * (1 - 0.45 * speedK * math.abs(steer))
+			if slick then grip *= 0.2 end
 			lat *= math.exp(-grip * dt)
+			if boost and fwd > 5 then -- ускорение держится, пока машина на полосе, затем плавно спадает
+				fwd = math.max(fwd, top * 1.3)
+				if os.clock() > boostAt then play("boost") end
+				boostAt = os.clock() + 1
+			end
 
 			-- руль: на скорости машина поворачивает плавнее, на месте не крутится
 			local turn = (cfg.turnLow + (cfg.turnHigh - cfg.turnLow) * speedK) * math.clamp(math.abs(fwd) / 12, 0, 1)
 			if hand then turn *= 1.35 end
+			if slick then turn *= 0.6 end
 			local wanted = -steer * turn * (fwd < 0 and -1 or 1)
 			yawRate += (wanted - yawRate) * math.min(1, dt * 8)
 
@@ -462,6 +482,10 @@ local function startCar(model, cfg)
 		if mag > limit then hx, hz = hx * limit / mag, hz * limit / mag end
 		-- страховка от вылета за карту: вверх не быстрее 22, высоко над дорогой — только вниз, за коридор — назад
 		local vy = math.min(v.Y, 22) + bump
+		if launch and os.clock() > launchAt then -- трамплин подбрасывает один раз за проезд
+			launchAt = os.clock() + 1
+			vy = 30
+		end
 		if pos.Y > cfg.roadY + 10 then vy = math.min(vy, 0) end
 		if pos.Y > cfg.roadY - 1.5 then
 			if pos.Z > cfg.maxZ then hz = math.min(hz, (cfg.maxZ - pos.Z) * 4) end
@@ -567,7 +591,7 @@ local function updateCarHud(hpK)
 	if hpK < 0.3 then state = state .. " · двигатель горит" end
 	if hpK < 0.4 then state = state .. " · скорость снижена" end
 	statusLabel.Text = (car:GetAttribute("Class") or "Машина") .. ": " .. state
-		.. (drive.hand and "\nРУЧНИК" or drifting and "\nДРИФТ!" or "")
+		.. "\n" .. (drive.zone or drive.hand and "РУЧНИК" or drifting and "ДРИФТ!" or "")
 	statusLabel.TextColor3 = Color3.fromRGB(255, 60, 60):Lerp(Color3.new(1, 1, 1), math.clamp(hpK * 1.5, 0, 1))
 
 	-- линии скорости появляются после 60% максимальной
@@ -664,6 +688,11 @@ local function showMessage()
 end
 folder:GetAttributeChangedSignal("Message"):Connect(showMessage)
 showMessage()
+local function showMap()
+	mapLabel.Text = "Карта: " .. (folder:GetAttribute("Map") or "—")
+end
+folder:GetAttributeChangedSignal("Map"):Connect(showMap)
+showMap()
 
 StateEv.OnClientEvent:Connect(function(kind, a, b, c)
 	if kind == "msg" then
