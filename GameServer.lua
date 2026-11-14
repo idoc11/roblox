@@ -872,7 +872,6 @@ local function cleanup()
 	if round.car then round.car:Destroy() end
 	for _, plr in ipairs({ round.hunter, round.runner }) do
 		if plr.Parent then
-			plr.ReplicationFocus = nil
 			StateEv:FireClient(plr, "end")
 			plr:LoadCharacter()
 		end
@@ -904,7 +903,7 @@ local function playRound(hunter, runner)
 	hrp.Anchored = true
 	local drone, vf = buildDrone(hunter)
 	round.drone, round.vf = drone, vf
-	hunter.ReplicationFocus = drone -- при StreamingEnabled мир подгружается вокруг дрона
+	task.wait(0.3) -- дать модели дрона реплицироваться клиенту до команды на управление
 	StateEv:FireClient(hunter, "drone", drone, DRONES[1], 1)
 
 	msgAll("🚁 " .. hunter.Name .. " — ОХОТНИК   |   🚗 " .. runner.Name .. " — БЕГЛЕЦ")

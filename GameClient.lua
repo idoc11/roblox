@@ -76,6 +76,7 @@ end
 
 ------------------------------------------------------------------ ДРОН (охотник)
 local function startDrone(d, cfg)
+	if not d then warn("DroneChase: дрон не найден") return end
 	stopControl()
 	drone, droneCfg = d, cfg
 	camera.CameraSubject = d
@@ -135,6 +136,7 @@ end)
 
 ------------------------------------------------------------------ МАШИНА (беглец)
 local function startCar(car, maxSpeed)
+	if not car then warn("DroneChase: машина не найдена") return end
 	stopControl()
 	local body = car:WaitForChild("Body")
 	local seat = car:WaitForChild("Seat")
@@ -195,12 +197,12 @@ StateEv.OnClientEvent:Connect(function(kind, a, b)
 		timerLabel.Text = "⏱ " .. tostring(a)
 		progFill.Size = UDim2.fromScale(math.clamp(b, 0, 1), 1)
 	elseif kind == "drone" then
-		startDrone(a, b)
+		startDrone(a or workspace:WaitForChild("Drone", 10), b) -- модель могла ещё не догрузиться
 	elseif kind == "cfg" then
 		droneCfg = a
 		showDroneHelp()
 	elseif kind == "car" then
-		startCar(a, b)
+		startCar(a or workspace:WaitForChild("RunnerCar", 10), b)
 	elseif kind == "end" then
 		stopControl()
 		timerLabel.Text = ""
