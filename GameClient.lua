@@ -18,6 +18,7 @@ local mouse = player:GetMouse()
 local folder = RS:WaitForChild("DroneChase")
 local FireEv, SwitchEv, StateEv = folder:WaitForChild("Fire"), folder:WaitForChild("Switch"), folder:WaitForChild("State")
 local ReloadEv = folder:WaitForChild("Reload", 5)
+local PickEv = folder:WaitForChild("PickCar", 5)
 
 ------------------------------------------------------------------ ЗВУКИ
 -- Встроенные звуки Roblox: { файл, громкость, высота тона }. Можно заменить на свои rbxassetid://...
@@ -34,6 +35,8 @@ local SOUNDS = {
 	hit          = { "rbxasset://sounds/electronicpingshort.wav", 0.35, 1.6 },
 	crit         = { "rbxasset://sounds/electronicpingshort.wav", 0.5, 2.2 },
 	warn         = { "rbxasset://sounds/electronicpingshort.wav", 0.6, 1 },
+	crash        = { "rbxasset://sounds/collide.wav", 0.9, 1.5 },
+	pick         = { "rbxasset://sounds/button.wav", 0.6, 1 },
 }
 
 ------------------------------------------------------------------ GUI
@@ -127,6 +130,97 @@ warnLabel.Text = "⚠ РАКЕТА! УКЛОНЯЙСЯ"
 warnLabel.TextColor3 = Color3.fromRGB(255, 70, 70)
 warnLabel.Visible = false
 
+-- приборы беглеца: спидометр, полоса скорости, состояние машины
+local carPanel = Instance.new("Frame")
+carPanel.AnchorPoint = Vector2.new(1, 1)
+carPanel.Position = UDim2.new(1, -16, 1, -16)
+carPanel.Size = UDim2.fromOffset(250, 104)
+carPanel.BackgroundColor3 = Color3.new(0, 0, 0)
+carPanel.BackgroundTransparency = 0.4
+carPanel.BorderSizePixel = 0
+carPanel.Visible = false
+carPanel.Parent = gui
+local speedLabel = label(UDim2.new(0.5, 0, 0, 4), UDim2.new(1, -12, 0, 40), 30, carPanel)
+speedLabel.BackgroundTransparency = 1
+local _, speedFill = bar(UDim2.new(0.5, 0, 0, 48), UDim2.new(1, -24, 0, 10), Color3.fromRGB(60, 220, 255), carPanel)
+local statusLabel = label(UDim2.new(0.5, 0, 0, 64), UDim2.new(1, -12, 0, 34), 13, carPanel)
+statusLabel.BackgroundTransparency = 1
+
+local function button(text, pos, size, parent)
+	local b = Instance.new("TextButton")
+	b.AnchorPoint = Vector2.new(0, 1)
+	b.Position = pos
+	b.Size = size
+	b.BackgroundColor3 = Color3.new(0, 0, 0)
+	b.BackgroundTransparency = 0.35
+	b.BorderSizePixel = 0
+	b.TextColor3 = Color3.new(1, 1, 1)
+	b.Font = Enum.Font.GothamBold
+	b.TextSize = 14
+	b.TextWrapped = true
+	b.Text = text
+	b.Parent = parent or gui
+	return b
+end
+
+-- ручник для сенсорных экранов (на клавиатуре — пробел, на геймпаде — X)
+local handTouch = false
+local handButton = button("РУЧНИК", UDim2.new(1, -290, 1, -130), UDim2.fromOffset(110, 70))
+handButton.Visible = false
+handButton.InputBegan:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then handTouch = true end
+end)
+handButton.InputEnded:Connect(function(input)
+	if input.UserInputType == Enum.UserInputType.Touch or input.UserInputType == Enum.UserInputType.MouseButton1 then handTouch = false end
+end)
+
+-- выбор машины в лобби: список классов сервер публикует атрибутами Car1, Car2, ...
+local pickPanel = Instance.new("Frame")
+pickPanel.AnchorPoint = Vector2.new(0, 1)
+pickPanel.Position = UDim2.new(0, 16, 1, -16)
+pickPanel.Size = UDim2.fromOffset(170, 200)
+pickPanel.BackgroundTransparency = 1
+pickPanel.Parent = gui
+local pickButtons = {}
+local function refreshPick()
+	local chosen = player:GetAttribute("Car") or 1
+	for i, b in ipairs(pickButtons) do
+		b.BackgroundColor3 = i == chosen and Color3.fromRGB(40, 150, 80) or Color3.new(0, 0, 0)
+	end
+end
+do
+	local i = 1
+	while folder:GetAttribute("Car" .. i) do
+		local f = string.split(folder:GetAttribute("Car" .. i), "|")
+		local idx = i
+		local b = button(("%s\nпрочность %s · скорость %s"):format(f[1], f[2], math.floor(tonumber(f[3]) * 3)),
+			UDim2.new(0, 0, 1, -(i - 1) * 60), UDim2.fromOffset(170, 54), pickPanel)
+		b.Activated:Connect(function()
+			if PickEv then PickEv:FireServer(idx) end -- сервер проверит и запишет выбор в атрибут игрока
+			play("pick")
+		end)
+		pickButtons[i] = b
+		i += 1
+	end
+	if #pickButtons > 0 then
+		local title = label(UDim2.new(0.5, 0, 1, -#pickButtons * 60 - 26), UDim2.fromOffset(170, 22), 13, pickPanel)
+		title.Text = "Машина беглеца"
+	end
+end
+player:GetAttributeChangedSignal("Car"):Connect(refreshPick)
+refreshPick()
+
+-- линии скорости по краям экрана
+local streaks = {}
+for i = 1, 8 do
+	local f = Instance.new("Frame")
+	f.BackgroundColor3 = Color3.new(1, 1, 1)
+	f.BorderSizePixel = 0
+	f.Visible = false
+	f.Parent = gui
+	streaks[i] = f
+end
+
 -- прицельные метки: маркер попадания, урон, захват цели
 local function floating(textSize)
 	local l = label(UDim2.fromOffset(0, 0), UDim2.fromOffset(170, 26), textSize)
@@ -149,6 +243,8 @@ hurtFlash.Parent = gui
 local conn = nil
 local drone, droneCfg = nil, nil
 local car = nil          -- машина, которой управляет этот игрок
+local carCfg = nil       -- её характеристики (от сервера)
+local drive = { speed = 0, lat = 0, hand = false } -- текущее движение для приборов
 local pendingPush = nil  -- ударная волна от сервера, ещё не применённая к машине
 local hitUntil, lockNoteUntil, nextWarn = 0, 0, 0
 
@@ -159,6 +255,8 @@ local function stopControl()
 	drone, car, pendingPush = nil, nil, nil
 	helpLabel.Visible = false
 	weaponPanel.Visible, hpBg.Visible, warnLabel.Visible = false, false, false
+	carPanel.Visible, handButton.Visible, pickPanel.Visible = false, false, true
+	for _, f in ipairs(streaks) do f.Visible = false end
 	hitLabel.Visible, lockLabel.Visible = false, false
 	mouse.Icon = ""
 	mouse.TargetFilter = nil
@@ -192,6 +290,7 @@ local function startDrone(d, cfg)
 	mouse.TargetFilter = d -- прицел не должен упираться в собственный дрон в центре экрана
 	mouse.Icon = "rbxasset://textures/GunCursor.png"
 	weaponPanel.Visible = true
+	pickPanel.Visible = false
 	showDroneHelp()
 
 	local align = d:WaitForChild("Align")
@@ -264,45 +363,119 @@ task.spawn(function()
 end)
 
 ------------------------------------------------------------------ МАШИНА (беглец)
-local function startCar(model, maxSpeed)
+-- Аркадная физика. Машиной владеет клиент беглеца (сетевое владение), поэтому расчёт идёт здесь.
+-- Каждый кадр берём ФАКТИЧЕСКУЮ скорость кузова (после столкновений), раскладываем её на продольную
+-- и боковую, меняем их по газу, тормозу, сцеплению и рулю и записываем обратно.
+-- Удар о препятствие сам гасит скорость, а боковое скольжение даёт занос.
+local CAR_DEFAULTS = { maxSpeed = 70, accel = 38, brake = 70, grip = 9, driftGrip = 2.2, turnLow = 2.5, turnHigh = 1.35,
+	roadY = 101, minX = -1e5, maxX = 1e5, maxZ = 1e5 }
+
+local function handbrake()
+	return handTouch or UIS:IsKeyDown(Enum.KeyCode.Space) or UIS:IsGamepadButtonDown(Enum.UserInputType.Gamepad1, Enum.KeyCode.ButtonX)
+end
+
+local function startCar(model, cfg)
 	if not model then warn("DroneChase: машина не найдена") return end
 	stopControl()
-	car = model
+	if typeof(cfg) ~= "table" then cfg = { maxSpeed = tonumber(cfg) } end
+	for k, v in pairs(CAR_DEFAULTS) do
+		if cfg[k] == nil then cfg[k] = v end
+	end
+	car, carCfg = model, cfg
 	local body = car:WaitForChild("Body")
 	local seat = car:WaitForChild("Seat")
 	local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
 	if hum then hum:SetStateEnabled(Enum.HumanoidStateType.Jumping, false) end
 	camera.CameraSubject = seat
-	hpBg.Visible = true
+	hpBg.Visible, carPanel.Visible, pickPanel.Visible = true, true, false
+	handButton.Visible = UIS.TouchEnabled
 	helpLabel.Visible = true
 	helpLabel.TextColor3 = Color3.fromRGB(60, 220, 90)
-	helpLabel.Text = "Ты — БЕГЛЕЦ! W/S — газ/тормоз, A/D — руль.\nОбъезжай блоки и доедь до финиша, пока дрон тебя не взорвал!"
+	helpLabel.Text = "Ты — БЕГЛЕЦ! W/S — газ/тормоз, A/D — руль, ПРОБЕЛ — ручник (дрифт).\nОбъезжай препятствия и доедь до финиша, пока дрон тебя не взорвал!"
 
-	local speed = 0
-	local shove = Vector3.zero -- боковой снос от ударной волны, быстро затухает
+	local params = RaycastParams.new()
+	params.FilterDescendantsInstances = { car, player.Character }
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local yawRate = 0
 	conn = RunService.Heartbeat:Connect(function(dt)
 		if not body.Parent then stopControl() return end
-		local thr, steer = seat.ThrottleFloat, seat.SteerFloat
-		local target = thr >= 0 and thr * maxSpeed or thr * maxSpeed * 0.4
-		speed += (target - speed) * math.min(1, dt * (thr == 0 and 0.8 or 1.6))
-
-		local bump = 0
-		if pendingPush then -- взрыв рядом: теряем скорость, машину подбрасывает и сносит
-			speed *= pendingPush.slow
-			shove += pendingPush.side
-			bump = pendingPush.up
-			pendingPush = nil
-		end
-		shove *= math.exp(-dt * 3)
+		dt = math.min(dt, 0.05) -- провал FPS не должен превращаться в рывок
+		local thr, steer, hand = seat.ThrottleFloat, seat.SteerFloat, handbrake()
 
 		local look = body.CFrame.LookVector
 		local flat = Vector3.new(look.X, 0, look.Z)
 		if flat.Magnitude < 0.1 then return end
 		flat = flat.Unit
+		local right = Vector3.new(-flat.Z, 0, flat.X)
 		local v = body.AssemblyLinearVelocity
-		body.AssemblyLinearVelocity = Vector3.new(flat.X * speed + shove.X, math.min(v.Y, 30) + bump, flat.Z * speed + shove.Z)
-		body.AssemblyAngularVelocity = Vector3.new(0, -steer * 2.2 * math.clamp(speed / 15, -1, 1), 0)
-		camera.FieldOfView = 70 + 14 * math.clamp(math.abs(speed) / maxSpeed, 0, 1) -- ощущение скорости
+		local fwd, lat = v:Dot(flat), v:Dot(right)
+		local pos = body.Position
+
+		-- сильно повреждённая машина теряет в максимальной скорости
+		local hpK = (car:GetAttribute("HP") or 100) / (car:GetAttribute("MaxHP") or 100)
+		local top = cfg.maxSpeed * (hpK < 0.2 and 0.85 or hpK < 0.4 and 0.93 or 1)
+
+		local bump = 0
+		if workspace:Raycast(pos, Vector3.new(0, -2.2, 0), params) then -- колёса на земле
+			if thr > 0 then
+				if fwd < 0 then
+					fwd += cfg.brake * dt -- гасим задний ход
+				else
+					fwd += cfg.accel * thr * math.max(0, 1 - (fwd / top) ^ 2) * dt -- тяга плавно падает к максимальной скорости
+				end
+			elseif thr < 0 then
+				if fwd > 2 then
+					fwd = math.max(0, fwd + cfg.brake * thr * dt) -- тормоз
+				else
+					fwd = math.max(fwd + cfg.accel * 0.6 * thr * dt, -top * 0.35) -- задний ход
+				end
+			else
+				fwd *= math.exp(-0.35 * dt) -- накат
+			end
+			if fwd > top then fwd -= (fwd - top) * math.min(1, 2 * dt) end
+			if hand then fwd *= math.exp(-0.9 * dt) end
+
+			-- сцепление: чем быстрее и чем круче руль, тем сильнее сносит; на ручнике задняя ось срывается
+			local speedK = math.clamp(math.abs(fwd) / top, 0, 1)
+			local grip = hand and cfg.driftGrip or cfg.grip * (1 - 0.45 * speedK * math.abs(steer))
+			lat *= math.exp(-grip * dt)
+
+			-- руль: на скорости машина поворачивает плавнее, на месте не крутится
+			local turn = (cfg.turnLow + (cfg.turnHigh - cfg.turnLow) * speedK) * math.clamp(math.abs(fwd) / 12, 0, 1)
+			if hand then turn *= 1.35 end
+			local wanted = -steer * turn * (fwd < 0 and -1 or 1)
+			yawRate += (wanted - yawRate) * math.min(1, dt * 8)
+
+			if pendingPush then -- взрыв рядом: теряем скорость, машину сносит и подбрасывает
+				fwd = fwd * pendingPush.slow + pendingPush.side:Dot(flat)
+				lat += pendingPush.side:Dot(right)
+				bump = pendingPush.up
+				pendingPush = nil
+			end
+		else
+			yawRate *= math.exp(-2 * dt) -- в воздухе руль и газ не действуют
+		end
+
+		local hx, hz = flat.X * fwd + right.X * lat, flat.Z * fwd + right.Z * lat
+		local limit = top * 1.4 + 20
+		local mag = math.sqrt(hx * hx + hz * hz)
+		if mag > limit then hx, hz = hx * limit / mag, hz * limit / mag end
+		-- страховка от вылета за карту: вверх не быстрее 22, высоко над дорогой — только вниз, за коридор — назад
+		local vy = math.min(v.Y, 22) + bump
+		if pos.Y > cfg.roadY + 10 then vy = math.min(vy, 0) end
+		if pos.Y > cfg.roadY - 1.5 then
+			if pos.Z > cfg.maxZ then hz = math.min(hz, (cfg.maxZ - pos.Z) * 4) end
+			if pos.Z < -cfg.maxZ then hz = math.max(hz, (-cfg.maxZ - pos.Z) * 4) end
+			if pos.X < cfg.minX then hx = math.max(hx, (cfg.minX - pos.X) * 4) end
+			if pos.X > cfg.maxX then hx = math.min(hx, (cfg.maxX - pos.X) * 4) end
+		end
+		body.AssemblyLinearVelocity = Vector3.new(hx, vy, hz)
+		body.AssemblyAngularVelocity = Vector3.new(0, yawRate, 0)
+
+		drive.speed, drive.lat, drive.hand = math.abs(fwd), lat, hand
+		-- эффект скорости: поле зрения плавно растёт, на ручнике камера чуть «отпускает»
+		local fov = 70 + 16 * math.clamp(math.abs(fwd) / cfg.maxSpeed, 0, 1) + (hand and 3 or 0)
+		camera.FieldOfView += (fov - camera.FieldOfView) * math.min(1, dt * 5)
 	end)
 end
 
@@ -310,14 +483,105 @@ end
 -- Вращение пропеллеров дронов и колёс машин: сервер помечает их Weld-ы тегами,
 -- каждый клиент крутит их у себя (плавно и без сетевого трафика).
 local spins = setmetatable({}, { __mode = "k" })
-local function turn(w, axis, delta)
+local function turn(w, axis, delta, steer)
 	local s = spins[w]
 	if not s then
 		s = { c0 = w.C0, angle = 0 }
 		spins[w] = s
 	end
 	s.angle = (s.angle + delta) % (math.pi * 2)
-	w.C0 = s.c0 * CFrame.fromAxisAngle(axis, s.angle)
+	local base = steer and s.c0 * CFrame.Angles(0, steer, 0) or s.c0 -- передние колёса ещё и поворачиваются
+	w.C0 = base * CFrame.fromAxisAngle(axis, s.angle)
+end
+
+-- Эффекты машины считаются у каждого зрителя по реплицированной скорости кузова:
+-- дым и следы шин при заносе и торможении, пыль, стоп-сигнал, искры и звук удара, звук двигателя.
+local fx = nil
+local function carEffects(dt)
+	local model = workspace:FindFirstChild("RunnerCar")
+	local body = model and model:FindFirstChild("Body")
+	if not body then fx = nil return end
+	if not fx or fx.body ~= body then
+		fx = { body = body, dust = {}, smoke = {}, skids = {}, ref = 0, refAt = 0, crashAt = 0, lastFwd = 0 }
+		for _, d in ipairs(body:GetDescendants()) do
+			if d.Name == "Dust" then table.insert(fx.dust, d)
+			elseif d.Name == "TireSmoke" then table.insert(fx.smoke, d)
+			elseif d.Name == "Skid" then table.insert(fx.skids, d)
+			elseif d.Name == "CrashSparks" then fx.sparks = d
+			elseif d.Name == "Engine" then fx.engine = d
+			elseif d.Name == "Wind" then fx.wind = d end
+		end
+		local tail = model:FindFirstChild("TailLight")
+		fx.brake = tail and tail:FindFirstChildOfClass("PointLight")
+	end
+	local v = body.AssemblyLinearVelocity
+	local cf = body.CFrame
+	local fwd, lat = v:Dot(cf.LookVector), v:Dot(cf.RightVector)
+	local speed = Vector3.new(v.X, 0, v.Z).Magnitude
+	local k = math.clamp(speed / (model:GetAttribute("MaxSpeed") or 70), 0, 1.2)
+	local decel = (fx.lastFwd - fwd) / math.max(dt, 1e-3)
+	fx.lastFwd = fwd
+	local drifting = math.abs(lat) > 12 and speed > 15
+	local braking = decel > 30 and fwd > 10
+
+	for _, e in ipairs(fx.dust) do e.Rate = speed > 12 and speed * 0.3 or 0 end
+	for _, e in ipairs(fx.smoke) do e.Rate = drifting and 40 + math.abs(lat) or braking and 30 or 0 end
+	for _, t in ipairs(fx.skids) do t.Enabled = drifting or braking end
+	if fx.brake then fx.brake.Brightness = decel > 15 and 5 or 1.5 end
+	if fx.engine then
+		fx.engine.PlaybackSpeed = 0.6 + 1.3 * k -- обороты растут со скоростью
+		fx.engine.Volume = 0.3 + 0.3 * k
+	end
+	if fx.wind then fx.wind.Volume = 0.5 * k * k end
+
+	-- удар: скорость резко упала за 0.1 с
+	local t = os.clock()
+	if fx.ref - speed > 25 and t > fx.crashAt then
+		fx.crashAt = t + 0.5
+		if fx.sparks then fx.sparks:Emit(30) end
+		play("crash", body.Position)
+		if car == model then camera.FieldOfView = math.max(55, camera.FieldOfView - 8) end -- встряска камеры
+	end
+	if t > fx.refAt then fx.ref, fx.refAt = speed, t + 0.1 end
+
+	-- анимация колёс: вращение по скорости, передние повёрнуты по дуге поворота
+	local roll = -fwd / 1.05 * dt
+	local steer = math.clamp(math.atan2(7.3 * body.AssemblyAngularVelocity.Y, math.max(math.abs(fwd), 5)), -0.5, 0.5) * (fwd < 0 and -1 or 1)
+	for _, w in ipairs(CollectionService:GetTagged("CarWheel")) do turn(w, Vector3.xAxis, roll) end
+	for _, w in ipairs(CollectionService:GetTagged("CarWheelF")) do turn(w, Vector3.xAxis, roll, steer) end
+end
+
+-- приборы водителя
+local STATUS = { { 0.8, "исправна" }, { 0.6, "царапины" }, { 0.4, "повреждена" }, { 0.2, "тяжёлые повреждения" }, { -1, "КРИТИЧЕСКОЕ СОСТОЯНИЕ" } }
+local function updateCarHud(hpK)
+	local c = carCfg
+	speedLabel.Text = math.floor(drive.speed * 3) .. " км/ч"
+	local k = math.clamp(drive.speed / c.maxSpeed, 0, 1)
+	speedFill.Size = UDim2.fromScale(k, 1)
+	local drifting = math.abs(drive.lat) > 12 and drive.speed > 15
+	speedFill.BackgroundColor3 = drifting and Color3.fromRGB(255, 190, 60) or Color3.fromRGB(60, 220, 255)
+	local state = ""
+	for _, st in ipairs(STATUS) do
+		if hpK > st[1] then state = st[2] break end
+	end
+	if hpK < 0.3 then state = state .. " · двигатель горит" end
+	if hpK < 0.4 then state = state .. " · скорость снижена" end
+	statusLabel.Text = (car:GetAttribute("Class") or "Машина") .. ": " .. state
+		.. (drive.hand and "\nРУЧНИК" or drifting and "\nДРИФТ!" or "")
+	statusLabel.TextColor3 = Color3.fromRGB(255, 60, 60):Lerp(Color3.new(1, 1, 1), math.clamp(hpK * 1.5, 0, 1))
+
+	-- линии скорости появляются после 60% максимальной
+	local a = math.clamp((k - 0.6) / 0.4, 0, 1)
+	local size = camera.ViewportSize
+	for i, f in ipairs(streaks) do
+		f.Visible = a > 0
+		if a > 0 then
+			local len = math.random(60, 180)
+			f.Size = UDim2.fromOffset(len, 2)
+			f.Position = UDim2.fromOffset(i % 2 == 0 and math.random(0, 120) or size.X - len - math.random(0, 120), math.random(0, size.Y))
+			f.BackgroundTransparency = 1 - 0.45 * a
+		end
+	end
 end
 
 local function atMouse(l, dy)
@@ -374,10 +638,7 @@ RunService.RenderStepped:Connect(function(dt)
 	for _, w in ipairs(CollectionService:GetTagged("DroneRotor")) do
 		turn(w, Vector3.yAxis, dt * 45)
 	end
-	for _, w in ipairs(CollectionService:GetTagged("CarWheel")) do
-		local b = w.Part0
-		if b then turn(w, Vector3.xAxis, -b.AssemblyLinearVelocity:Dot(b.CFrame.LookVector) / 1.05 * dt) end
-	end
+	carEffects(dt)
 
 	if drone and drone.Parent and droneCfg then updateWeaponHud() end
 
@@ -386,6 +647,7 @@ RunService.RenderStepped:Connect(function(dt)
 		local k = math.clamp(hp / max, 0, 1)
 		hpFill.Size = UDim2.fromScale(k, 1)
 		hpFill.BackgroundColor3 = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(60, 220, 90), k)
+		if carCfg then updateCarHud(k) end
 		local danger = (car:GetAttribute("Missiles") or 0) > 0
 		warnLabel.Visible = danger and os.clock() % 0.5 < 0.3
 		if danger and os.clock() > nextWarn then

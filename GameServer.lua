@@ -17,8 +17,6 @@ local BRIDGE_Y      = 100
 local BRIDGE_LEN    = 1200
 local BRIDGE_WIDTH  = 44
 local ROUND_TIME    = 120
-local CAR_HP        = 100
-local CAR_MAX_SPEED = 70
 local RESPAWN_TIME  = 2 -- через сколько секунд возрождается погибший персонаж
 
 -- система раундов: ModuleScript RoundService должен лежать внутри этого скрипта
@@ -48,6 +46,26 @@ local DRONES = {
 }
 local SWITCH_TIME = 0.5 -- время трансформации при смене дрона, с
 
+-- Машины беглеца. Игрок выбирает класс в лобби; характеристики применяет сервер.
+-- accel/brake — студов/с²; grip — сцепление (больше = меньше занос), driftGrip — сцепление на ручнике;
+-- turnLow/turnHigh — скорость поворота (рад/с) на малой и на максимальной скорости;
+-- pushResist — насколько сильно машину бросает взрывом (меньше = устойчивее).
+local CARS = {
+	{ name = "Спорткар", style = "sport", hp = 100, maxSpeed = 70, accel = 38, brake = 70, grip = 9,   driftGrip = 2.2,
+		turnLow = 2.5, turnHigh = 1.35, pushResist = 1,    color = Color3.fromRGB(40, 200, 90) },
+	{ name = "Суперкар", style = "super", hp = 75,  maxSpeed = 86, accel = 50, brake = 80, grip = 7.5, driftGrip = 1.8,
+		turnLow = 2.3, turnHigh = 1.05, pushResist = 1.15, color = Color3.fromRGB(255, 120, 30) },
+	{ name = "Броневик", style = "armor", hp = 150, maxSpeed = 56, accel = 26, brake = 55, grip = 11,  driftGrip = 3.2,
+		turnLow = 2.1, turnHigh = 1.3,  pushResist = 0.5,  color = Color3.fromRGB(88, 96, 72) },
+}
+-- коридор, в котором клиент удерживает машину (страховка от вылета за карту при сбое физики)
+for _, c in ipairs(CARS) do
+	c.roadY, c.minX, c.maxX, c.maxZ = BRIDGE_Y + 1, 13, BRIDGE_LEN + 80, BRIDGE_WIDTH / 2 - 3
+end
+local CRASH_DROP = 30  -- потеря скорости за шаг матча (0.1 с), с которой удар считается аварией
+local CRASH_MAX  = 15  -- максимум урона от одного столкновения
+local ENGINE_SOUND = "rbxasset://sounds/bass.wav" -- заглушка из встроенных звуков; лучше заменить на петлю двигателя
+
 -- зона полёта дронов (клиент мягко удерживает дрон внутри, сервер не принимает выстрелы снаружи)
 local FLIGHT = { minY = BRIDGE_Y + 6, maxY = BRIDGE_Y + 160, minX = -150, maxX = BRIDGE_LEN + 150, maxZ = 350 }
 for _, d in ipairs(DRONES) do d.bounds = FLIGHT end
@@ -66,6 +84,20 @@ local FireEv   = remote("Fire")
 local SwitchEv = remote("Switch")
 local StateEv  = remote("State")
 local ReloadEv = remote("Reload")
+local PickEv   = remote("PickCar")
+
+-- выбор машины: клиент присылает только номер класса, сервер проверяет и запоминает
+for i, c in ipairs(CARS) do
+	folder:SetAttribute("Car" .. i, table.concat({ c.name, c.hp, c.maxSpeed, c.accel }, "|"))
+end
+local function initPlayer(plr)
+	if not plr:GetAttribute("Car") then plr:SetAttribute("Car", 1) end
+end
+Players.PlayerAdded:Connect(initPlayer)
+for _, plr in ipairs(Players:GetPlayers()) do initPlayer(plr) end
+PickEv.OnServerEvent:Connect(function(plr, idx)
+	if typeof(idx) == "number" and CARS[idx] then plr:SetAttribute("Car", idx) end
+end)
 
 ------------------------------------------------------------------ КОНСТРУКТОР ДЕТАЛЕЙ
 local V, rgb, M = Vector3.new, Color3.fromRGB, Enum.Material
@@ -188,7 +220,7 @@ end
 ------------------------------------------------------------------ КУЗОВ СПОРТКАРА
 -- Строится вокруг коллизионного блока Body 7x2x12 (перед = -Z, земля на y = -1).
 -- wreck = true → упрощённый ржавый остов для препятствий (root — CFrame, детали заякорены).
-local function buildCarShell(model, root, paint, wreck)
+local function buildCarShell(model, root, paint, wreck, style)
 	local pm = wreck and M.CorrodedMetal or M.SmoothPlastic
 	local gloss = { Reflectance = wreck and 0 or 0.25 }
 	local glass = { Transparency = wreck and 0.6 or 0.35, Reflectance = 0.4 }
@@ -237,16 +269,43 @@ local function buildCarShell(model, root, paint, wreck)
 			skin("Block", V(0.7, 0.28, 0.45), s * 3.6, 1.65, -1.7)                                        -- зеркало
 			P("Block", V(0.08, 0.08, 4.6), s * 3.42, -0.25, 0.075, paint, M.Neon)                         -- подсветка порога
 			P("Block", V(1, 0.06, 1.3), s * 1.5, 1.32, -3.6, BLACK, nil, nil, CFrame.Angles(-0.156, 0, 0)) -- жабры капота
-			table.insert(shell.wing, P("Block", V(0.2, 0.75, 0.5), s * 2.2, 1.85, 5.3, BLACK))           -- стойка спойлера
-			table.insert(shell.wing, skin("Block", V(0.12, 0.6, 1.4), s * 3.4, 2.2, 5.4))                 -- законцовка крыла
+			if style ~= "armor" then
+				table.insert(shell.wing, P("Block", V(0.2, 0.75, 0.5), s * 2.2, 1.85, 5.3, BLACK))       -- стойка спойлера
+				table.insert(shell.wing, skin("Block", V(0.12, 0.6, 1.4), s * 3.4, 2.2, 5.4))             -- законцовка крыла
+			end
 		end
-		table.insert(shell.wing, P("Block", V(6.8, 0.14, 1.3), 0, 2.28, 5.4, BLACK)) -- антикрыло
+		if style ~= "armor" then
+			table.insert(shell.wing, P("Block", V(6.8, 0.14, 1.3), 0, 2.28, 5.4, BLACK)) -- антикрыло
+		end
+	end
+
+	-- отличия классов (shell.wing — детали, которые отлетают при тяжёлых повреждениях)
+	if style == "super" then -- суперкар: высокое второе крыло, канарды, воздухозаборник на крыше
+		for _, s in ipairs(SIDES) do
+			table.insert(shell.wing, P("Block", V(0.14, 1.1, 1.6), s * 3.45, 2.6, 5.5, BLACK))
+			P("Block", V(1.1, 0.08, 0.7), s * 3.1, 0.2, -5.6, BLACK, nil, nil, CFrame.Angles(0, 0, s * -0.2))
+			P("Block", V(0.08, 0.12, 3.2), s * 2.2, 1.56, 4.2, paint, M.Neon)
+		end
+		table.insert(shell.wing, P("Block", V(7.1, 0.14, 1), 0, 3.1, 5.7, BLACK))
+		P("Wedge", V(1.6, 0.35, 1.6), 0, 2.82, 1.1, BLACK, nil, nil, back)
+	elseif style == "armor" then -- броневик: кенгурятник, бронелисты, заслонки окон, плита и фары на крыше
+		for _, s in ipairs(SIDES) do
+			table.insert(shell.wing, P("Block", V(0.3, 1.5, 0.3), s * 1.8, 0.35, -6.2, DARK, M.Metal))
+			P("Block", V(0.2, 1.3, 4.6), s * 3.5, 0.45, 0.075, DARK, M.DiamondPlate)
+			P("Block", V(0.15, 0.6, 1.9), s * 2.88, 2.05, 1.1, DARK, M.Metal)
+		end
+		for _, y in ipairs({ -0.1, 0.8 }) do
+			table.insert(shell.wing, P("Cylinder", V(6.6, 0.3, 0.3), 0, y, -6.3, DARK, M.Metal))
+		end
+		P("Block", V(6, 0.25, 3.6), 0, 2.78, 1.4, DARK, M.DiamondPlate)
+		P("Block", V(3, 0.3, 0.4), 0, 3.05, 0.2, AMBER, M.Neon)
+		P("Block", V(1.2, 1.4, 0.7), 2, 1.4, 6.3, rgb(60, 70, 50), M.Metal)
 	end
 
 	-- колёса: шина, диск, спицы (у остова одного колеса нет)
 	for i, w in ipairs({ { -3, -3.7 }, { 3, -3.7 }, { -3, 3.6 }, { 3, 3.6 } }) do
 		if not (wreck and i == 2) then
-			local tire = P("Cylinder", V(1.1, 2.1, 2.1), w[1], 0.05, w[2], rgb(14, 14, 14), M.Rubber, { Spin = not wreck and "CarWheel" or nil })
+			local tire = P("Cylinder", V(1.1, 2.1, 2.1), w[1], 0.05, w[2], rgb(14, 14, 14), M.Rubber, { Spin = not wreck and (i <= 2 and "CarWheelF" or "CarWheel") or nil }) -- передние ещё и поворачиваются
 			local sub = { WeldTo = tire }
 			P("Cylinder", V(1.16, 1.35, 1.35), w[1], 0.05, w[2], STEEL, M.Metal, sub)
 			if not wreck then
@@ -548,7 +607,8 @@ local function buildObstacles()
 end
 
 ------------------------------------------------------------------ МАШИНА
-local function buildCar()
+local function buildCar(cfg)
+	local maxHp = cfg.hp
 	local model = Instance.new("Model")
 	model.Name = "RunnerCar"
 	local start = Vector3.new(30, BRIDGE_Y + 2, 0)
@@ -559,17 +619,18 @@ local function buildCar()
 	body.Name = "Body"
 	body.Size = Vector3.new(7, 2, 12)
 	body.CFrame = cf
-	body.Color = Color3.fromRGB(40, 200, 90)
+	body.Color = cfg.color
 	body.Transparency = 1
 	body.CastShadow = false
 	body.CustomPhysicalProperties = PhysicalProperties.new(1, 0, 0, 100, 100)
 	body.Parent = model
 	model.PrimaryPart = body
 
-	local shell = buildCarShell(model, body, body.Color, false)
+	local shell = buildCarShell(model, body, body.Color, false, cfg.style)
 	for _, l in ipairs(shell.lamps) do
 		make("SpotLight", l, { Face = Enum.NormalId.Front, Range = 60, Angle = 70, Brightness = 3, Color = rgb(235, 240, 255), Shadows = false })
 	end
+	shell.tail.Name = "TailLight" -- клиенты усиливают свет при торможении
 	make("PointLight", shell.tail, { Color = RED, Range = 10, Brightness = 1.5 })
 
 	local seat = Instance.new("VehicleSeat")
@@ -606,16 +667,33 @@ local function buildCar()
 	local sparks = make("ParticleEmitter", engine, { Texture = TEX.spark, Rate = 0, Enabled = false, Lifetime = NumberRange.new(0.3, 0.7),
 		Speed = NumberRange.new(20, 40), Size = NumberSequence.new(0.5, 0), Acceleration = V(0, -60, 0),
 		Color = ColorSequence.new(rgb(255, 220, 120)), LightEmission = 1, SpreadAngle = Vector2.new(180, 180) })
-	local dust = {}
+	-- Эффекты колёс, удара и звук двигателя. Сервер их только создаёт; включает и настраивает каждый клиент
+	-- у себя по реплицированной скорости машины (дрифт, торможение, авария) — сеть при этом не нагружается.
 	for _, s in ipairs(SIDES) do
-		local wheel = make("Attachment", body, { Position = V(s * 3, -0.9, 4.6) })
-		table.insert(dust, make("ParticleEmitter", wheel, { Texture = TEX.smoke, Rate = 0, Lifetime = NumberRange.new(0.6, 1.2),
+		local wheel = make("Attachment", body, { Name = "RearWheel", Position = V(s * 3, -0.9, 4.2) })
+		make("ParticleEmitter", wheel, { Name = "Dust", Texture = TEX.smoke, Rate = 0, Lifetime = NumberRange.new(0.6, 1.2),
 			Speed = NumberRange.new(2, 5), Size = NumberSequence.new(1, 4), Transparency = NumberSequence.new(0.75, 1),
-			Color = ColorSequence.new(rgb(170, 160, 150)), EmissionDirection = Enum.NormalId.Back, SpreadAngle = Vector2.new(20, 20) }))
+			Color = ColorSequence.new(rgb(170, 160, 150)), EmissionDirection = Enum.NormalId.Back, SpreadAngle = Vector2.new(20, 20) })
+		make("ParticleEmitter", wheel, { Name = "TireSmoke", Texture = TEX.smoke, Rate = 0, Lifetime = NumberRange.new(0.8, 1.6),
+			Speed = NumberRange.new(3, 7), Size = NumberSequence.new(1.5, 6), Transparency = NumberSequence.new(0.45, 1),
+			Color = ColorSequence.new(rgb(235, 235, 235)), EmissionDirection = Enum.NormalId.Back, SpreadAngle = Vector2.new(30, 30),
+			Rotation = NumberRange.new(0, 360), Drag = 2 })
+		make("Trail", body, { Name = "Skid", Enabled = false, Lifetime = 3.5, FaceCamera = false, -- след шины на асфальте
+			Attachment0 = make("Attachment", body, { Position = V(s * 3 - 0.5, -0.96, 3.6) }),
+			Attachment1 = make("Attachment", body, { Position = V(s * 3 + 0.5, -0.96, 3.6) }),
+			Color = ColorSequence.new(rgb(15, 15, 15)), Transparency = NumberSequence.new(0.35, 1) })
 		make("Trail", body, { Attachment0 = make("Attachment", body, { Position = V(s * 2.9, 0.62, 6) }),
 			Attachment1 = make("Attachment", body, { Position = V(s * 2.9, 0.78, 6) }), Lifetime = 0.25,
 			Color = ColorSequence.new(RED), Transparency = NumberSequence.new(0.3, 1), LightEmission = 1 })
 	end
+	make("ParticleEmitter", make("Attachment", body, { Position = V(0, 0, -6) }), { Name = "CrashSparks", Texture = TEX.spark, Rate = 0,
+		Enabled = false, Lifetime = NumberRange.new(0.3, 0.8), Speed = NumberRange.new(25, 50), Size = NumberSequence.new(0.6, 0),
+		Acceleration = V(0, -60, 0), Color = ColorSequence.new(rgb(255, 220, 120)), LightEmission = 1, SpreadAngle = Vector2.new(70, 70),
+		EmissionDirection = Enum.NormalId.Front })
+	make("Sound", body, { Name = "Engine", SoundId = ENGINE_SOUND, Looped = true, Volume = 0, Playing = true,
+		RollOffMinDistance = 15, RollOffMaxDistance = 300 })
+	make("Sound", body, { Name = "Wind", SoundId = "rbxasset://sounds/Rocket whoosh 01.wav", Looped = true, Volume = 0, Playing = true,
+		RollOffMinDistance = 15, RollOffMaxDistance = 200 })
 
 	-- полоска HP
 	local bb = Instance.new("BillboardGui")
@@ -642,7 +720,7 @@ local function buildCar()
 		if beam then beam.Enabled = false end
 	end
 	local function damageLook(hp)
-		local s = math.clamp(math.floor((1 - hp / CAR_HP) * 5), 0, 4)
+		local s = math.clamp(math.floor((1 - hp / maxHp) * 5), 0, 4)
 		if s <= stage then return end
 		local was = stage
 		stage = s
@@ -669,23 +747,25 @@ local function buildCar()
 		end
 	end
 
-	model:SetAttribute("MaxHP", CAR_HP)
+	model:SetAttribute("MaxHP", maxHp)
+	model:SetAttribute("MaxSpeed", cfg.maxSpeed)
+	model:SetAttribute("Class", cfg.name)
 	model:SetAttribute("Missiles", 0)
-	model:SetAttribute("HP", CAR_HP)
+	model:SetAttribute("HP", maxHp)
 	model:GetAttributeChangedSignal("HP"):Connect(function()
 		local hp = math.max(0, model:GetAttribute("HP"))
 		damageLook(hp)
-		fill.Size = UDim2.fromScale(hp / CAR_HP, 1)
-		fill.BackgroundColor3 = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(60, 220, 90), hp / CAR_HP)
+		fill.Size = UDim2.fromScale(hp / maxHp, 1)
+		fill.BackgroundColor3 = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(60, 220, 90), hp / maxHp)
 		-- чем меньше HP, тем гуще дым; ниже 30% двигатель горит
-		smoke.Enabled = hp < CAR_HP * 0.7
-		smoke.Rate = 5 + 30 * (1 - hp / CAR_HP)
-		fire.Enabled = hp < CAR_HP * 0.3
+		smoke.Enabled = hp < maxHp * 0.7
+		smoke.Rate = 5 + 30 * (1 - hp / maxHp)
+		fire.Enabled = hp < maxHp * 0.3
 		sparks:Emit(14)
 	end)
 
 	model.Parent = workspace
-	return model, body, seat, dust
+	return model, body, seat
 end
 
 ------------------------------------------------------------------ ДРОН
@@ -872,11 +952,12 @@ local function updateReload(r)
 end
 
 ---------------------------------------------------------------- урон
-local function damageCar(amount, pos, crit)
+-- quiet = урон не от оружия (авария): охотнику маркер попадания не показываем
+local function damageCar(amount, pos, crit, quiet)
 	local r = round
 	if not r or not r.car or not r.active or amount <= 0 then return end
 	r.car:SetAttribute("HP", r.car:GetAttribute("HP") - amount)
-	if r.hunter.Parent then StateEv:FireClient(r.hunter, "hit", amount, crit == true, pos) end -- маркер попадания
+	if not quiet and r.hunter.Parent then StateEv:FireClient(r.hunter, "hit", amount, crit == true, pos) end -- маркер попадания
 	if r.runner.Parent then StateEv:FireClient(r.runner, "hurt", amount) end
 end
 
@@ -925,8 +1006,9 @@ local function explode(pos, radius, dmg, push)
 	if push and r.runner.Parent then
 		local away = (body.Position - pos) * Vector3.new(1, 0, 1)
 		away = away.Magnitude > 0.1 and away.Unit or Vector3.zero
-		local f = 0.4 + 0.6 * k
-		StateEv:FireClient(r.runner, "push", away * push.side * f, push.up * f, 1 - (1 - push.slow) * f)
+		local f = (0.4 + 0.6 * k) * r.carCfg.pushResist -- тяжёлую машину бросает слабее
+		r.pushUntil = now() + 0.7                        -- потеря скорости от взрыва — не авария
+		StateEv:FireClient(r.runner, "push", away * push.side * f, push.up * f, math.clamp(1 - (1 - push.slow) * f, 0.3, 1))
 	end
 end
 
@@ -1260,8 +1342,11 @@ end
 function world.setup(match)
 	local hunter, runner = match.hunter, match.runner
 	buildObstacles()
-	local car, body, seat, dust = buildCar()
-	round = { id = match.id, hunter = hunter, runner = runner, car = car, body = body, seat = seat, dust = dust,
+	local carCfg = CARS[runner:GetAttribute("Car") or 1] or CARS[1]
+	local car, body, seat = buildCar(carCfg)
+	round = { id = match.id, hunter = hunter, runner = runner, car = car, body = body, seat = seat, carCfg = carCfg,
+		lastSpeed = 0, pushUntil = 0, startTime = os.clock(),
+		minTime = (BRIDGE_LEN - 50) / (carCfg.maxSpeed * 1.5), -- быстрее этого доехать до финиша физически нельзя
 		droneIdx = 1, switchEnd = 0, weapons = {}, ticks = 0, active = false }
 	for i, cfg in ipairs(DRONES) do -- у каждого дрона свой магазин
 		round.weapons[i] = { ammo = cfg.mag, nextFire = 0 }
@@ -1275,7 +1360,8 @@ function world.setup(match)
 	task.wait(0.2)
 	if not runner.Parent then return false, "Беглец вышел" end
 	body:SetNetworkOwner(runner)
-	StateEv:FireClient(runner, "car", car, CAR_MAX_SPEED)
+	round.startTime = os.clock()
+	StateEv:FireClient(runner, "car", car, carCfg)
 	hideCharacter(ch)
 
 	if not aliveCharacter(hunter) then return false, "Охотник пропал" end
@@ -1304,15 +1390,25 @@ function world.tick(match, left)
 		StateEv:FireAllClients("timer", math.max(0, math.ceil(left)), body.Position.X / (BRIDGE_LEN - 20))
 	end
 
-	local speed = body.AssemblyLinearVelocity.Magnitude -- пыль из-под колёс на скорости
-	for _, e in ipairs(r.dust) do e.Rate = speed > 12 and speed * 0.35 or 0 end
+	-- авария: резкая потеря скорости. Урон считает сервер по своей картине движения машины.
+	local v = body.AssemblyLinearVelocity
+	local speed = Vector3.new(v.X, 0, v.Z).Magnitude
+	local drop = r.lastSpeed - speed
+	if r.active and drop > CRASH_DROP and now() > r.pushUntil then
+		damageCar(math.min(CRASH_MAX, 3 + (drop - CRASH_DROP) * 0.4), body.Position, false, true)
+	end
+	r.lastSpeed = speed
 
 	seatRunner(r) -- выпавшего из кресла водителя возвращаем за руль
 	if r.drone then updateReload(r) end
 
 	local destroyed = r.car:GetAttribute("HP") <= 0
-	local fell = body.Parent == nil or body.Position.Y < BRIDGE_Y - 20
-	local finished = body.Position.X >= BRIDGE_LEN - 20
+	-- «упала» — это и падение с моста, и любой вылет за пределы карты из-за сбоя физики
+	local p = body.Position
+	local fell = body.Parent == nil or p ~= p or p.Y < BRIDGE_Y - 20 or p.Y > BRIDGE_Y + 80
+		or math.abs(p.Z) > 400 or p.X < -300 or p.X > BRIDGE_LEN + 400
+	-- финиш засчитывается, только если машина могла доехать за это время (защита от телепорта)
+	local finished = p.X >= BRIDGE_LEN - 20 and os.clock() - r.startTime >= r.minTime
 	if destroyed or fell or finished then
 		return { destroyed = destroyed, fell = fell, finished = finished }
 	end
@@ -1330,7 +1426,7 @@ function world.restore(match, role)
 		seatRunner(r)
 		task.delay(0.5, function() -- после того как клиент обработает появление нового персонажа
 			if round == r and r.runner.Parent and r.car.Parent then
-				StateEv:FireClient(r.runner, "car", r.car, CAR_MAX_SPEED)
+				StateEv:FireClient(r.runner, "car", r.car, r.carCfg)
 			end
 		end)
 	else
