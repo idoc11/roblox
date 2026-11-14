@@ -18,6 +18,14 @@ local BRIDGE_WIDTH  = 44
 local ROUND_TIME    = 120
 local CAR_HP        = 100
 local CAR_MAX_SPEED = 70
+local RESPAWN_TIME  = 2 -- через сколько секунд возрождается погибший персонаж
+
+-- система раундов: ModuleScript RoundService должен лежать внутри этого скрипта
+local roundModule = script:FindFirstChild("RoundService")
+if not roundModule then
+	error("DroneChase: не найден ModuleScript RoundService. Положите его внутрь скрипта GameServer.")
+end
+local RoundService = require(roundModule)
 
 local DRONES = {
 	{ name = "Скаут",    speed = 85, weapon = "gun",    dmg = 4,  cooldown = 0.15, radius = 0,  color = Color3.fromRGB(80, 200, 255), size = Vector3.new(3, 1, 3) },
@@ -747,7 +755,7 @@ end
 local round = nil
 
 local function damageCar(amount)
-	if not round or not round.car then return end
+	if not round or not round.car or not round.active then return end
 	round.car:SetAttribute("HP", round.car:GetAttribute("HP") - amount)
 end
 
@@ -826,7 +834,9 @@ local function projectile(origin, velocity, size, color, onHit, useGravity)
 end
 
 FireEv.OnServerEvent:Connect(function(plr, target)
-	if not round or plr ~= round.hunter or typeof(target) ~= "Vector3" then return end
+	-- принимаем выстрел только от охотника идущего матча; запоздавшие события прошлого раунда отсекаются
+	if not round or not round.active or not round.drone or plr ~= round.hunter then return end
+	if typeof(target) ~= "Vector3" or target ~= target or target.Magnitude > 1e5 then return end -- в т.ч. NaN и бесконечность
 	local cfg = DRONES[round.droneIdx]
 	local now = os.clock()
 	if now - round.lastFire < cfg.cooldown then return end
@@ -844,7 +854,9 @@ FireEv.OnServerEvent:Connect(function(plr, target)
 		local res = workspace:Raycast(origin, dir * 400, params)
 		tracer(origin, res and res.Position or origin + dir * 400, cfg.color)
 		if res then hitFx(res.Position, res.Normal) end
-		if res and res.Instance:IsDescendantOf(round.car) then damageCar(cfg.dmg) end
+		-- скрытый водитель торчит над крышей: попадание в него тоже считается попаданием в машину
+		local driver = round.runner.Character
+		if res and (res.Instance:IsDescendantOf(round.car) or (driver and res.Instance:IsDescendantOf(driver))) then damageCar(cfg.dmg) end
 	elseif cfg.weapon == "bomb" then
 		projectile(origin, round.drone.AssemblyLinearVelocity * 0.8, 2.5, cfg.color, function(pos)
 			explode(pos, cfg.radius, cfg.dmg)
@@ -857,117 +869,211 @@ FireEv.OnServerEvent:Connect(function(plr, target)
 end)
 
 SwitchEv.OnServerEvent:Connect(function(plr, idx)
-	if not round or plr ~= round.hunter or typeof(idx) ~= "number" or not DRONES[idx] then return end
+	if not round or not round.active or not round.drone or plr ~= round.hunter then return end
+	if typeof(idx) ~= "number" or not DRONES[idx] or idx == round.droneIdx then return end
+	local now = os.clock()
+	if now - round.lastSwitch < 0.4 then return end -- смена пересобирает модель: не чаще раза в 0.4 с
+	round.lastSwitch = now
 	round.droneIdx = idx
 	applyDroneType(round.drone, round.vf, idx)
 	StateEv:FireClient(plr, "cfg", DRONES[idx], idx)
 end)
 
------------------------------------------------------------------- ИГРОВОЙ ЦИКЛ
-local function msgAll(text) StateEv:FireAllClients("msg", text) end
+------------------------------------------------------------------ МИР ДЛЯ СИСТЕМЫ РАУНДОВ
+-- Здесь только действия над сценой. Когда и что вызывать, решает RoundService:
+-- он единственный владелец состояния игры (лобби, отсчёт, матч, результат).
+local HUNTER_SPOT = CFrame.new(0, BRIDGE_Y + 64, -70)
+
+local function msgAll(text)
+	folder:SetAttribute("Message", text) -- опоздавшие и только что зашедшие клиенты читают атрибут
+	StateEv:FireAllClients("msg", text)
+end
 
 local function getHum(plr)
 	local ch = plr.Character
 	return ch and ch:FindFirstChildOfClass("Humanoid"), ch and ch:FindFirstChild("HumanoidRootPart")
 end
 
-local function cleanup()
-	if not round then return end
-	if round.drone then round.drone:Destroy() end
-	if round.car then round.car:Destroy() end
-	for _, plr in ipairs({ round.hunter, round.runner }) do
-		if plr.Parent then
-			StateEv:FireClient(plr, "end")
-			plr:LoadCharacter()
-		end
-	end
-	round = nil
+-- живой персонаж игрока (в мире, с HumanoidRootPart) или nil
+local function aliveCharacter(plr)
+	local ch = plr.Character
+	local hum, hrp = getHum(plr)
+	if ch and ch.Parent and hum and hrp and hum.Health > 0 then return ch, hum, hrp end
+	return nil
 end
 
-local function playRound(hunter, runner)
+local function loadCharacter(plr)
+	task.spawn(pcall, plr.LoadCharacter, plr) -- LoadCharacter ждёт загрузки: не блокируем цикл раундов
+end
+
+-- водитель скрыт за тонировкой; детали, догрузившиеся позже (аксессуары), тоже прячем
+local function hideCharacter(ch)
+	local function hide(d)
+		if d:IsA("BasePart") or d:IsA("Decal") then d.Transparency = 1 end
+	end
+	for _, d in ipairs(ch:GetDescendants()) do hide(d) end
+	ch.DescendantAdded:Connect(hide)
+end
+
+local function seatRunner(r)
+	local ch, hum = aliveCharacter(r.runner)
+	if ch and r.seat.Parent and r.seat.Occupant ~= hum then
+		ch:PivotTo(r.seat.CFrame * CFrame.new(0, 3, 0))
+		r.seat:Sit(hum)
+	end
+end
+
+local function placeHunter(r)
+	local ch, _, hrp = aliveCharacter(r.hunter)
+	if ch then
+		ch:PivotTo(HUNTER_SPOT)
+		hrp.Anchored = true
+	end
+end
+
+-- убирает всё, что относится к матчу; безопасно вызывать повторно и после любого сбоя
+local function cleanup(match)
+	local r = round
+	round = nil
+	if r then
+		if r.drone then r.drone:Destroy() end
+		if r.car then r.car:Destroy() end
+	end
+	for _, inst in ipairs(workspace:GetChildren()) do -- остатки недостроенного матча
+		if inst.Name == "RunnerCar" or inst.Name == "Drone" then inst:Destroy() end
+	end
+	StateEv:FireAllClients("end")
+	for _, plr in ipairs({ match.hunter, match.runner }) do
+		if plr.Parent then loadCharacter(plr) end
+	end
+end
+
+local world = {}
+
+world.message = msgAll
+world.cleanup = cleanup
+
+function world.publish(info)
+	folder:SetAttribute("State", info.state)
+	folder:SetAttribute("MatchId", info.matchId)
+	folder:SetAttribute("Hunter", info.hunter)
+	folder:SetAttribute("Runner", info.runner)
+	folder:SetAttribute("Winner", info.winner)
+	folder:SetAttribute("Queue", table.concat(info.queue, ", "))
+end
+
+function world.character(plr)
+	return (aliveCharacter(plr))
+end
+
+function world.respawn(plr)
+	if not Players.CharacterAutoLoads then loadCharacter(plr) end -- иначе Roblox возродит сам через RESPAWN_TIME
+end
+
+function world.prepare(plr, timeout)
+	if not aliveCharacter(plr) then loadCharacter(plr) end
+	local t0 = os.clock()
+	while not aliveCharacter(plr) do
+		if not plr.Parent or os.clock() - t0 > timeout then return false end
+		task.wait(0.1)
+	end
+	return true
+end
+
+-- бывший playRound, часть 1: строим сцену и раздаём управление
+function world.setup(match)
+	local hunter, runner = match.hunter, match.runner
 	buildObstacles()
 	local car, body, seat, dust = buildCar()
-	round = { hunter = hunter, runner = runner, car = car, body = body, seat = seat, droneIdx = 1, lastFire = 0 }
+	round = { id = match.id, hunter = hunter, runner = runner, car = car, body = body, seat = seat, dust = dust,
+		droneIdx = 1, lastFire = 0, lastSwitch = 0, ticks = 0, active = false }
 
-	local hum = getHum(runner)
-	if not hum then return "Беглец пропал" end
-	runner.Character:PivotTo(seat.CFrame * CFrame.new(0, 3, 0))
+	local ch, hum = aliveCharacter(runner)
+	if not ch then return false, "Беглец пропал" end
+	ch:PivotTo(seat.CFrame * CFrame.new(0, 3, 0))
 	task.wait(0.2)
 	seat:Sit(hum)
 	task.wait(0.2)
+	if not runner.Parent then return false, "Беглец вышел" end
 	body:SetNetworkOwner(runner)
 	StateEv:FireClient(runner, "car", car, CAR_MAX_SPEED)
-	-- водитель скрыт за тонировкой (персонаж вернётся после LoadCharacter в cleanup)
-	for _, d in ipairs(runner.Character:GetDescendants()) do
-		if d:IsA("BasePart") or d:IsA("Decal") then d.Transparency = 1 end
-	end
+	hideCharacter(ch)
 
-	local _, hrp = getHum(hunter)
-	if not hrp then return "Охотник пропал" end
-	hunter.Character:PivotTo(CFrame.new(0, BRIDGE_Y + 64, -70))
-	hrp.Anchored = true
+	if not aliveCharacter(hunter) then return false, "Охотник пропал" end
+	placeHunter(round)
 	local drone, vf = buildDrone(hunter)
 	round.drone, round.vf = drone, vf
 	task.wait(0.3) -- дать модели дрона реплицироваться клиенту до команды на управление
+	if not hunter.Parent then return false, "Охотник вышел" end
 	StateEv:FireClient(hunter, "drone", drone, DRONES[1], 1)
+	return true
+end
 
-	msgAll("🚁 " .. hunter.Name .. " — ОХОТНИК   |   🚗 " .. runner.Name .. " — БЕГЛЕЦ")
+function world.begin(match)
+	if round and round.id == match.id then round.active = true end
+end
 
-	local t0 = os.clock()
-	while true do
-		task.wait(0.1)
-		if not hunter.Parent then return runner.Name .. " победил (охотник вышел)" end
-		if not runner.Parent then return hunter.Name .. " победил (беглец вышел)" end
-		local left = ROUND_TIME - (os.clock() - t0)
-		StateEv:FireAllClients("timer", math.ceil(left), body.Position.X / (BRIDGE_LEN - 20))
+-- бывший playRound, часть 2: один шаг матча. Возвращает nil или события этого шага;
+-- кто победил и что считать ничьей, решает RoundService.
+function world.tick(match, left)
+	local r = round
+	if not r or r.id ~= match.id then error("сцена матча потеряна") end
+	local body = r.body
+	r.ticks = r.ticks + 1
+	if r.ticks % 2 == 0 then -- таймер и прогресс 5 раз в секунду
+		StateEv:FireAllClients("timer", math.max(0, math.ceil(left)), body.Position.X / (BRIDGE_LEN - 20))
+	end
 
-		local speed = body.AssemblyLinearVelocity.Magnitude -- пыль из-под колёс на скорости
-		for _, e in ipairs(dust) do e.Rate = speed > 12 and speed * 0.35 or 0 end
+	local speed = body.AssemblyLinearVelocity.Magnitude -- пыль из-под колёс на скорости
+	for _, e in ipairs(r.dust) do e.Rate = speed > 12 and speed * 0.35 or 0 end
 
-		if car:GetAttribute("HP") <= 0 then
-			explode(body.Position, 10, 0)
-			return "💥 Машина уничтожена! Победил охотник " .. hunter.Name
-		end
-		if body.Position.Y < BRIDGE_Y - 20 then
-			return "🌊 Машина упала с моста! Победил охотник " .. hunter.Name
-		end
-		if body.Position.X >= BRIDGE_LEN - 20 then
-			return "🏁 " .. runner.Name .. " доехал до конца моста и победил!"
-		end
-		if left <= 0 then
-			return "⏱ Время вышло! Победил охотник " .. hunter.Name
-		end
-		local h = getHum(runner)
-		if h and h.Health > 0 and seat.Occupant ~= h then
-			runner.Character:PivotTo(seat.CFrame * CFrame.new(0, 3, 0))
-			seat:Sit(h)
-		end
+	seatRunner(r) -- выпавшего из кресла водителя возвращаем за руль
+
+	local destroyed = r.car:GetAttribute("HP") <= 0
+	local fell = body.Parent == nil or body.Position.Y < BRIDGE_Y - 20
+	local finished = body.Position.X >= BRIDGE_LEN - 20
+	if destroyed or fell or finished then
+		return { destroyed = destroyed, fell = fell, finished = finished }
+	end
+	return nil
+end
+
+-- персонаж участника возродился посреди матча: возвращаем его на место и заново отдаём управление
+function world.restore(match, role)
+	local r = round
+	if not r or r.id ~= match.id then return end
+	if role == "runner" then
+		local ch = aliveCharacter(r.runner)
+		if not ch then return end
+		hideCharacter(ch)
+		seatRunner(r)
+		task.delay(0.5, function() -- после того как клиент обработает появление нового персонажа
+			if round == r and r.runner.Parent and r.car.Parent then
+				StateEv:FireClient(r.runner, "car", r.car, CAR_MAX_SPEED)
+			end
+		end)
+	else
+		placeHunter(r)
+		task.delay(0.5, function()
+			if round == r and r.hunter.Parent and r.drone and r.drone.Parent then
+				StateEv:FireClient(r.hunter, "drone", r.drone, DRONES[r.droneIdx], r.droneIdx)
+			end
+		end)
 	end
 end
 
-local lastHunter = nil
-while true do
-	while #Players:GetPlayers() < 2 do
-		msgAll("Ждём второго игрока...")
-		task.wait(2)
-	end
-	for i = 5, 1, -1 do
-		msgAll("Раунд начнётся через " .. i)
-		task.wait(1)
-	end
-	local list = Players:GetPlayers()
-	if #list >= 2 then
-		local hunter, runner = list[1], list[2]
-		if lastHunter == hunter then hunter, runner = runner, hunter end -- роли меняются
-		lastHunter = hunter
-		for _, p in ipairs({ hunter, runner }) do
-			if not p.Character then p:LoadCharacter() end
-			p.Character:WaitForChild("HumanoidRootPart", 5)
-		end
-		local ok, result = pcall(playRound, hunter, runner)
-		msgAll(ok and result or ("Ошибка раунда: " .. tostring(result)))
-		task.wait(1)
-		cleanup()
-		task.wait(4)
-	end
+function world.finish(match, result)
+	local r = round
+	if not r or r.id ~= match.id then return end
+	r.active = false -- после решения исхода оружие больше не действует
+	if result.destroyed and r.body.Parent then explode(r.body.Position, 10, 0) end
 end
+
+------------------------------------------------------------------ ЗАПУСК
+Players.RespawnTime = RESPAWN_TIME
+
+RoundService.new({
+	Players = Players,
+	world = world,
+	config = { ROUND_TIME = ROUND_TIME },
+}):Start()

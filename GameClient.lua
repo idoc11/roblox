@@ -63,6 +63,7 @@ local function stopControl()
 	drone = nil
 	helpLabel.Visible = false
 	mouse.Icon = ""
+	mouse.TargetFilter = nil
 	camera.FieldOfView = 70
 	local hum = player.Character and player.Character:FindFirstChildOfClass("Humanoid")
 	if hum then camera.CameraSubject = hum end
@@ -80,6 +81,7 @@ local function startDrone(d, cfg)
 	stopControl()
 	drone, droneCfg = d, cfg
 	camera.CameraSubject = d
+	mouse.TargetFilter = d -- прицел не должен упираться в собственный дрон в центре экрана
 	mouse.Icon = "rbxasset://textures/GunCursor.png"
 	showDroneHelp()
 
@@ -190,6 +192,13 @@ RunService.RenderStepped:Connect(function(dt)
 end)
 
 ------------------------------------------------------------------ СОБЫТИЯ
+-- Сообщение сервера продублировано атрибутом: его видит и только что зашедший игрок.
+local function showMessage()
+	msgLabel.Text = folder:GetAttribute("Message") or ""
+end
+folder:GetAttributeChangedSignal("Message"):Connect(showMessage)
+showMessage()
+
 StateEv.OnClientEvent:Connect(function(kind, a, b)
 	if kind == "msg" then
 		msgLabel.Text = a
