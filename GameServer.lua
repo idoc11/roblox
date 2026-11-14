@@ -312,6 +312,11 @@ for _, shore in ipairs({ { -500, 16, -320, -20 }, { L - 16, L + 500, L + 20, L +
 	end
 end
 
+-- под лобби, вышкой и подъездными дорогами — голый грунт, чтобы трава не прорастала сквозь покрытие
+terrain:FillBlock(CFrame.new(-60, 94, 0), V(72, 4, 72), M.Ground)
+terrain:FillBlock(CFrame.new(-6, 94, -36), V(44, 4, 104), M.Ground)
+terrain:FillBlock(CFrame.new(L + 42, 94, 0), V(116, 4, 56), M.Ground)
+
 -- горы на горизонте
 for i = 1, 12 do
 	local ang = i / 12 * math.pi * 2 + rng:NextNumber(-0.15, 0.15)
@@ -465,7 +470,7 @@ local OBSTACLES = {
 	end,
 	function(o, len) -- грузовой контейнер
 		o = o * jitter(0.4)
-		piece(obstacles, o, "Block", V(5, 5.4, len), CFrame.new(0, 2.7, 0), PALETTE[math.random(#PALETTE)], M.CorrugatedMetal, SOLID)
+		piece(obstacles, o, "Block", V(5, 5.4, len), CFrame.new(0, 2.7, 0), PALETTE[math.random(#PALETTE)], M.Metal, SOLID)
 		for _, s in ipairs(SIDES) do
 			for _, y in ipairs({ 0.2, 5.3 }) do
 				piece(obstacles, o, "Block", V(0.4, 0.4, len + 0.2), CFrame.new(s * 2.4, y, 0), DARK, M.Metal)
