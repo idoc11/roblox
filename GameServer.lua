@@ -7,6 +7,7 @@
 local Players = game:GetService("Players")
 local RS = game:GetService("ReplicatedStorage")
 local Debris = game:GetService("Debris")
+local RunService = game:GetService("RunService")
 local Lighting = game:GetService("Lighting")
 local TweenService = game:GetService("TweenService")
 local CollectionService = game:GetService("CollectionService")
@@ -27,11 +28,29 @@ if not roundModule then
 end
 local RoundService = require(roundModule)
 
+-- Баланс: машина проезжает мост примерно за 20–28 с при 100 HP.
+-- speed/agility/tilt — полёт (agility: как быстро дрон набирает нужную скорость);
+-- dmg/cooldown/mag/reload — урон, пауза между выстрелами, магазин, время перезарядки.
 local DRONES = {
-	{ name = "Скаут",    speed = 85, weapon = "gun",    dmg = 4,  cooldown = 0.15, radius = 0,  color = Color3.fromRGB(80, 200, 255), size = Vector3.new(3, 1, 3) },
-	{ name = "Бомбер",   speed = 45, weapon = "bomb",   dmg = 35, cooldown = 2.0,  radius = 14, color = Color3.fromRGB(255, 140, 40), size = Vector3.new(6, 2, 6) },
-	{ name = "Ракетчик", speed = 60, weapon = "rocket", dmg = 20, cooldown = 1.0,  radius = 9,  color = Color3.fromRGB(230, 60, 60),  size = Vector3.new(4, 1.5, 4) },
+	-- СКАУТ: быстрый и вёрткий, скорострельный пулемёт с малым уроном; попадание в моторный отсек — крит
+	{ name = "Скаут",    speed = 90, agility = 6,   tilt = 0.45, weapon = "gun",    dmg = 2,  cooldown = 0.1, mag = 30, reload = 1.6, radius = 0,
+		range = 450, spread = 0.012, crit = 1.5,
+		color = Color3.fromRGB(80, 200, 255), size = Vector3.new(3, 1, 3) },
+	-- БОМБЕР: медленный и инертный, две мощные бомбы с большим радиусом и ударной волной, долгая перезарядка
+	{ name = "Бомбер",   speed = 48, agility = 2.2, tilt = 0.2,  weapon = "bomb",   dmg = 40, cooldown = 0.9, mag = 2,  reload = 4,   radius = 18,
+		push = { side = 35, up = 26, slow = 0.5 },
+		color = Color3.fromRGB(255, 140, 40), size = Vector3.new(6, 2, 6) },
+	-- РАКЕТЧИК: управляемые ракеты; скорость поворота ограничена, от ракеты можно уйти резким манёвром или за препятствие
+	{ name = "Ракетчик", speed = 65, agility = 3.5, tilt = 0.32, weapon = "rocket", dmg = 16, cooldown = 0.8, mag = 2,  reload = 5,   radius = 10,
+		rocketSpeed = 120, turn = 1.5, fuel = 5, lockRange = 450, lockCone = 0.35, loseAngle = 1.4,
+		push = { side = 14, up = 10, slow = 0.8 },
+		color = Color3.fromRGB(230, 60, 60),  size = Vector3.new(4, 1.5, 4) },
 }
+local SWITCH_TIME = 0.5 -- время трансформации при смене дрона, с
+
+-- зона полёта дронов (клиент мягко удерживает дрон внутри, сервер не принимает выстрелы снаружи)
+local FLIGHT = { minY = BRIDGE_Y + 6, maxY = BRIDGE_Y + 160, minX = -150, maxX = BRIDGE_LEN + 150, maxZ = 350 }
+for _, d in ipairs(DRONES) do d.bounds = FLIGHT end
 
 ------------------------------------------------------------------ REMOTES
 local folder = Instance.new("Folder")
@@ -46,6 +65,7 @@ end
 local FireEv   = remote("Fire")
 local SwitchEv = remote("Switch")
 local StateEv  = remote("State")
+local ReloadEv = remote("Reload")
 
 ------------------------------------------------------------------ КОНСТРУКТОР ДЕТАЛЕЙ
 local V, rgb, M = Vector3.new, Color3.fromRGB, Enum.Material
@@ -177,8 +197,12 @@ local function buildCarShell(model, root, paint, wreck)
 		local cf = CFrame.new(x, y, z)
 		return piece(model, root, shape, size, rot and cf * rot or cf, color, mat, extra)
 	end
-	local function skin(shape, size, x, y, z, rot) return P(shape, size, x, y, z, paint, pm, gloss, rot) end
-	local shell = { lamps = {} }
+	local shell = { lamps = {}, skin = {}, glass = {}, wing = {} } -- списки деталей для визуальных повреждений
+	local function skin(shape, size, x, y, z, rot)
+		local p = P(shape, size, x, y, z, paint, pm, gloss, rot)
+		table.insert(shell.skin, p)
+		return p
+	end
 
 	-- силуэт: днище, тоннель, двери, нос, капот, корма, палуба
 	P("Block", V(6.4, 0.3, 11.4), 0, -0.5, 0, BLACK)
@@ -189,11 +213,11 @@ local function buildCarShell(model, root, paint, wreck)
 	skin("Block", V(6.8, 1.35, 1.3), 0, 0.325, 5.35)
 	skin("Block", V(6.8, 0.5, 3.55), 0, 1.25, 4.225)
 	-- остекление: лобовое, боковые окна, крыша, фастбэк с задним стеклом
-	P("Wedge", V(5.8, 1.15, 2.4), 0, 2.075, -1.1, rgb(20, 30, 45), M.Glass, glass)
-	P("Block", V(5.6, 0.95, 2), 0, 1.975, 1.1, rgb(20, 30, 45), M.Glass, glass)
+	table.insert(shell.glass, P("Wedge", V(5.8, 1.15, 2.4), 0, 2.075, -1.1, rgb(20, 30, 45), M.Glass, glass))
+	table.insert(shell.glass, P("Block", V(5.6, 0.95, 2), 0, 1.975, 1.1, rgb(20, 30, 45), M.Glass, glass))
 	P("Block", V(5.8, 0.2, 2.1), 0, 2.55, 1.1, BLACK)
 	skin("Wedge", V(5.8, 1.15, 3), 0, 2.075, 3.6, back)
-	P("Wedge", V(4.6, 0.6, 1.565), 0, 2.352, 2.98, rgb(20, 30, 45), M.Glass, glass, back)
+	table.insert(shell.glass, P("Wedge", V(4.6, 0.6, 1.565), 0, 2.352, 2.98, rgb(20, 30, 45), M.Glass, glass, back))
 	-- перед: сплиттер, решётка, фары, воздухозаборники
 	P("Block", V(7, 0.2, 0.8), 0, -0.5, -5.75, BLACK)
 	P("Block", V(3.4, 0.55, 0.15), 0, 0, -5.8, BLACK, M.DiamondPlate)
@@ -213,10 +237,10 @@ local function buildCarShell(model, root, paint, wreck)
 			skin("Block", V(0.7, 0.28, 0.45), s * 3.6, 1.65, -1.7)                                        -- зеркало
 			P("Block", V(0.08, 0.08, 4.6), s * 3.42, -0.25, 0.075, paint, M.Neon)                         -- подсветка порога
 			P("Block", V(1, 0.06, 1.3), s * 1.5, 1.32, -3.6, BLACK, nil, nil, CFrame.Angles(-0.156, 0, 0)) -- жабры капота
-			P("Block", V(0.2, 0.75, 0.5), s * 2.2, 1.85, 5.3, BLACK)                                      -- стойка спойлера
-			skin("Block", V(0.12, 0.6, 1.4), s * 3.4, 2.2, 5.4)                                           -- законцовка крыла
+			table.insert(shell.wing, P("Block", V(0.2, 0.75, 0.5), s * 2.2, 1.85, 5.3, BLACK))           -- стойка спойлера
+			table.insert(shell.wing, skin("Block", V(0.12, 0.6, 1.4), s * 3.4, 2.2, 5.4))                 -- законцовка крыла
 		end
-		P("Block", V(6.8, 0.14, 1.3), 0, 2.28, 5.4, BLACK) -- антикрыло
+		table.insert(shell.wing, P("Block", V(6.8, 0.14, 1.3), 0, 2.28, 5.4, BLACK)) -- антикрыло
 	end
 
 	-- колёса: шина, диск, спицы (у остова одного колеса нет)
@@ -609,9 +633,48 @@ local function buildCar()
 	fill.BorderSizePixel = 0
 	fill.Parent = bg
 
+	-- визуальные повреждения по стадиям (каждые 20% HP): кузов темнеет и теряет блеск,
+	-- гаснут фары, отлетает антикрыло, стёкла покрываются копотью
+	local stage = 0
+	local function lampOff(l)
+		l.Material, l.Color = M.Glass, rgb(40, 40, 40)
+		local beam = l:FindFirstChildOfClass("SpotLight")
+		if beam then beam.Enabled = false end
+	end
+	local function damageLook(hp)
+		local s = math.clamp(math.floor((1 - hp / CAR_HP) * 5), 0, 4)
+		if s <= stage then return end
+		local was = stage
+		stage = s
+		local scorched = body.Color:Lerp(rgb(25, 22, 20), s * 0.2)
+		for _, p in ipairs(shell.skin) do
+			p.Color, p.Reflectance = scorched, 0.25 * (1 - s / 4)
+		end
+		if s >= 2 and was < 2 then lampOff(shell.lamps[1]) end
+		if s >= 3 and was < 3 then
+			for _, p in ipairs(shell.wing) do -- антикрыло отрывается и падает на дорогу
+				local w = p:FindFirstChildOfClass("WeldConstraint")
+				if w then w:Destroy() end
+				p.Massless, p.CanCollide = false, true
+				p.AssemblyLinearVelocity = body.AssemblyLinearVelocity * 0.5 + V(0, 18, 0)
+				Debris:AddItem(p, 4)
+			end
+			sparks:Emit(30)
+		end
+		if s >= 4 and was < 4 then
+			lampOff(shell.lamps[2])
+			for _, g in ipairs(shell.glass) do
+				g.Color, g.Transparency, g.Reflectance = rgb(12, 12, 12), 0.12, 0.05
+			end
+		end
+	end
+
+	model:SetAttribute("MaxHP", CAR_HP)
+	model:SetAttribute("Missiles", 0)
 	model:SetAttribute("HP", CAR_HP)
 	model:GetAttributeChangedSignal("HP"):Connect(function()
 		local hp = math.max(0, model:GetAttribute("HP"))
+		damageLook(hp)
 		fill.Size = UDim2.fromScale(hp / CAR_HP, 1)
 		fill.BackgroundColor3 = Color3.fromRGB(255, 60, 60):Lerp(Color3.fromRGB(60, 220, 90), hp / CAR_HP)
 		-- чем меньше HP, тем гуще дым; ниже 30% двигатель горит
@@ -749,17 +812,84 @@ local function applyDroneType(drone, vf, idx)
 	drone.Color = cfg.color
 	placeProps(drone, idx)
 	vf.Force = Vector3.new(0, drone.AssemblyMass * workspace.Gravity, 0)
+	-- плавная смена: новая модель проявляется из гаснущей вспышки цвета дрона
+	local d = cfg.size.X * 1.3
+	local flash = piece(drone.Visual, drone, "Ball", V(d, d, d), CFrame.identity, cfg.color, M.Neon, { Name = "Prop", Transparency = 0.15, CastShadow = false })
+	TweenService:Create(flash, TweenInfo.new(SWITCH_TIME), { Transparency = 1, Size = V(d, d, d) * 1.5 }):Play()
+	Debris:AddItem(flash, SWITCH_TIME + 0.1)
 end
 
 ------------------------------------------------------------------ ОРУЖИЕ
+-- Всё решает сервер: боезапас, перезарядка, темп огня, попадания и урон.
+-- Клиент присылает только точку прицеливания; цель ракете выбирает сервер.
 local round = nil
+local rand = Random.new()
+local projectiles = {} -- бомбы и ракеты в полёте
 
-local function damageCar(amount)
-	if not round or not round.car or not round.active then return end
-	round.car:SetAttribute("HP", round.car:GetAttribute("HP") - amount)
+local function now() return workspace:GetServerTimeNow() end
+local function sfx(name, pos) StateEv:FireAllClients("sfx", name, pos) end
+
+local function canAct(r, plr)
+	return r ~= nil and r.active and r.drone ~= nil and r.drone.Parent ~= nil and plr == r.hunter
 end
 
-local function explode(pos, radius, dmg)
+local function ignoreList(r, extra)
+	local list = { r.drone, extra }
+	if r.hunter.Character then table.insert(list, r.hunter.Character) end
+	return list
+end
+
+---------------------------------------------------------------- боезапас и перезарядка
+-- Состояние видно клиенту через атрибуты дрона (только для индикаторов).
+local function syncWeapon(r)
+	local st, cfg, d = r.weapons[r.droneIdx], DRONES[r.droneIdx], r.drone
+	d:SetAttribute("Weapon", r.droneIdx)
+	d:SetAttribute("Ammo", st.ammo)
+	d:SetAttribute("Mag", cfg.mag)
+	d:SetAttribute("ReloadStart", st.reloadStart or 0)
+	d:SetAttribute("ReloadEnd", st.reloadEnd or 0)
+	d:SetAttribute("SwitchEnd", r.switchEnd)
+end
+
+local function startReload(r, from)
+	local st, cfg = r.weapons[r.droneIdx], DRONES[r.droneIdx]
+	if st.reloadEnd or st.ammo >= cfg.mag then return end
+	st.reloadStart = math.max(now(), from or 0)
+	st.reloadEnd = st.reloadStart + cfg.reload
+	syncWeapon(r)
+	StateEv:FireClient(r.hunter, "sfx", "reload")
+end
+
+-- завершает перезарядку, когда вышло время (вызывается каждый шаг матча и перед выстрелом)
+local function updateReload(r)
+	local st = r.weapons[r.droneIdx]
+	if st.reloadEnd and now() >= st.reloadEnd then
+		st.ammo = DRONES[r.droneIdx].mag
+		st.reloadStart, st.reloadEnd = nil, nil
+		syncWeapon(r)
+		StateEv:FireClient(r.hunter, "sfx", "reloaded")
+	end
+end
+
+---------------------------------------------------------------- урон
+local function damageCar(amount, pos, crit)
+	local r = round
+	if not r or not r.car or not r.active or amount <= 0 then return end
+	r.car:SetAttribute("HP", r.car:GetAttribute("HP") - amount)
+	if r.hunter.Parent then StateEv:FireClient(r.hunter, "hit", amount, crit == true, pos) end -- маркер попадания
+	if r.runner.Parent then StateEv:FireClient(r.runner, "hurt", amount) end
+end
+
+-- расстояние от точки до ближайшей точки корпуса машины (а не до её центра)
+local function carDistance(body, pos)
+	local lp = body.CFrame:PointToObjectSpace(pos)
+	local h = body.Size / 2
+	local c = Vector3.new(math.clamp(lp.X, -h.X, h.X), math.clamp(lp.Y, -h.Y, h.Y + 1.7), math.clamp(lp.Z, -h.Z, h.Z))
+	return (lp - c).Magnitude
+end
+
+-- push = { side, up, slow } — ударная волна: отбрасывает и тормозит машину
+local function explode(pos, radius, dmg, push)
 	local e = Instance.new("Explosion")
 	e.Position = pos
 	e.BlastRadius = radius
@@ -767,15 +897,40 @@ local function explode(pos, radius, dmg)
 	e.DestroyJointRadiusPercent = 0
 	e.Parent = workspace
 	blastFx(pos, radius)
-	if dmg > 0 and round and round.body and round.body.Parent then
-		local dist = (round.body.Position - pos).Magnitude
-		if dist <= radius + 4 then
-			damageCar(dmg * (1 - math.clamp(dist / (radius + 4), 0, 0.6)))
-			round.body:ApplyImpulse(((round.body.Position - pos).Unit + Vector3.new(0, 0.6, 0)) * round.body.AssemblyMass * 25)
-		end
+	sfx(radius >= 15 and "bigExplosion" or "explosion", pos)
+	-- подпалина на асфальте
+	if math.abs(pos.Y - BRIDGE_Y) < 2.5 and pos.X > 0 and pos.X < BRIDGE_LEN and math.abs(pos.Z) < BRIDGE_WIDTH / 2 then
+		local mark = fxPart("Cylinder", V(0.1, radius * 0.9, radius * 0.9), CFrame.new(pos.X, BRIDGE_Y + 0.06, pos.Z) * UP, rgb(15, 15, 15), 10)
+		mark.Material = M.SmoothPlastic
+		mark.Transparency = 0.25
+		TweenService:Create(mark, TweenInfo.new(3, Enum.EasingStyle.Linear, Enum.EasingDirection.In, 0, false, 6.5), { Transparency = 1 }):Play()
+	end
+
+	local r = round
+	if dmg <= 0 or not r or not r.active or not r.body.Parent then return end
+	local body = r.body
+	local dist = carDistance(body, pos)
+	if dist > radius then return end
+	local k = 1 - dist / radius -- 1 в эпицентре, 0 на границе радиуса
+	local amount = dmg * (dist < 1.5 and 1 or 0.3 + 0.7 * k)
+	-- укрытие: препятствие между взрывом и машиной гасит половину урона
+	local params = RaycastParams.new()
+	params.FilterDescendantsInstances = ignoreList(r, r.runner.Character)
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	local from = pos + Vector3.new(0, 1, 0)
+	local res = workspace:Raycast(from, body.Position - from, params)
+	if res and not res.Instance:IsDescendantOf(r.car) then amount = amount * 0.5 end
+	damageCar(amount, pos, false)
+	-- машиной владеет клиент беглеца, поэтому толчок применяет он; величину задаёт сервер
+	if push and r.runner.Parent then
+		local away = (body.Position - pos) * Vector3.new(1, 0, 1)
+		away = away.Magnitude > 0.1 and away.Unit or Vector3.zero
+		local f = 0.4 + 0.6 * k
+		StateEv:FireClient(r.runner, "push", away * push.side * f, push.up * f, 1 - (1 - push.slow) * f)
 	end
 end
 
+---------------------------------------------------------------- эффекты выстрела
 local function tracer(a, b, color)
 	local len = (b - a).Magnitude
 	local t = Instance.new("Part")
@@ -793,89 +948,208 @@ local function tracer(a, b, color)
 	fxPart("Ball", V(1.1, 1.1, 1.1), CFrame.new(a), rgb(255, 235, 170), 0.05) -- дульная вспышка
 end
 
-local function projectile(origin, velocity, size, color, onHit, useGravity)
+local function launchFx(pos, dir)
+	local a = fxPart("Ball", V(1.6, 1.6, 1.6), CFrame.lookAt(pos, pos - dir), rgb(255, 220, 150), 1.5)
+	TweenService:Create(a, TweenInfo.new(0.12), { Transparency = 1 }):Play()
+	local smoke = smokeProps(0.8, 150) -- выхлоп назад из пускового блока
+	smoke.Speed, smoke.Lifetime = NumberRange.new(12, 22), NumberRange.new(0.5, 1)
+	smoke.Acceleration, smoke.EmissionDirection = Vector3.zero, Enum.NormalId.Front
+	burst(a, smoke)
+end
+
+---------------------------------------------------------------- снаряды
+-- Снаряд — серверная деталь. Попадание ищется лучом вдоль пройденного за кадр пути,
+-- поэтому быстрый снаряд не пролетает сквозь тонкие детали.
+local function projectile(r, cfg, origin, velocity, locked)
+	local rocket = cfg.weapon == "rocket"
 	local p = Instance.new("Part")
-	p.Shape = Enum.PartType.Ball
-	p.Size = Vector3.new(size, size, size)
-	p.Material = Enum.Material.Neon
-	p.Color = color
+	p.Name = "Projectile"
+	p.Shape = rocket and Enum.PartType.Cylinder or Enum.PartType.Ball
+	p.Size = rocket and V(2.4, 0.55, 0.55) or V(2.5, 2.5, 2.5)
+	p.Material = Enum.Material.Metal
+	p.Color = DARK
 	p.CanCollide = false
-	p.Position = origin
+	p.CanQuery = false
+	p.CanTouch = false
+	p.CFrame = rocket and CFrame.lookAt(origin, origin + velocity) * FWD or CFrame.new(origin)
 	p.Parent = workspace
 	p:SetNetworkOwner(nil)
 	p.AssemblyLinearVelocity = velocity
-	-- свечение и дымный след; у ракеты ещё факел двигателя
-	local a = make("Attachment", p)
-	make("PointLight", p, { Color = color, Range = 14, Brightness = 2 })
-	make("ParticleEmitter", a, { Texture = TEX.smoke, Rate = useGravity and 15 or 45, Lifetime = NumberRange.new(0.4, 0.9), Speed = NumberRange.new(0, 1),
-		Size = NumberSequence.new(size * 0.5, size * 1.6), Transparency = NumberSequence.new(0.4, 1), Color = ColorSequence.new(rgb(200, 200, 200), rgb(90, 90, 90)) })
-	if not useGravity then
-		make("ParticleEmitter", a, { Texture = TEX.fire, Rate = 60, Lifetime = NumberRange.new(0.15, 0.3), Speed = NumberRange.new(0, 2),
-			Size = NumberSequence.new(size, 0), Transparency = NumberSequence.new(0, 1), Color = ColorSequence.new(rgb(255, 230, 120), color), LightEmission = 1 })
-		local vf = Instance.new("VectorForce")
-		vf.Attachment0 = a
-		vf.RelativeTo = Enum.ActuatorRelativeTo.World
-		vf.Force = Vector3.new(0, p.AssemblyMass * workspace.Gravity, 0)
-		vf.Parent = p
+
+	local tail = make("Attachment", p, { Position = rocket and V(-1.2, 0, 0) or Vector3.zero })
+	make("PointLight", p, { Color = cfg.color, Range = 14, Brightness = 2 })
+	make("ParticleEmitter", tail, { Texture = TEX.smoke, Rate = rocket and 70 or 15, Lifetime = NumberRange.new(0.7, 1.3), Speed = NumberRange.new(0, 1),
+		Size = NumberSequence.new(0.8, rocket and 3.2 or 2.5), Transparency = NumberSequence.new(0.35, 1),
+		Color = ColorSequence.new(rgb(215, 215, 215), rgb(100, 100, 100)), Rotation = NumberRange.new(0, 360) })
+	if rocket then
+		make("ParticleEmitter", tail, { Texture = TEX.fire, Rate = 60, Lifetime = NumberRange.new(0.15, 0.3), Speed = NumberRange.new(0, 2),
+			Size = NumberSequence.new(1.3, 0), Transparency = NumberSequence.new(0, 1), Color = ColorSequence.new(rgb(255, 230, 120), cfg.color), LightEmission = 1 })
+		piece(p, p, "Ball", V(0.55, 0.55, 0.55), CFrame.new(1.2, 0, 0), cfg.color, M.Neon, GHOST)  -- боевая часть
+		piece(p, p, "Block", V(0.5, 1.3, 0.08), CFrame.new(-0.95, 0, 0), cfg.color, nil, GHOST)   -- стабилизаторы
+		piece(p, p, "Block", V(0.5, 0.08, 1.3), CFrame.new(-0.95, 0, 0), cfg.color, nil, GHOST)
+		make("VectorForce", p, { Attachment0 = tail, RelativeTo = Enum.ActuatorRelativeTo.World, ApplyAtCenterOfMass = true,
+			Force = Vector3.new(0, p.AssemblyMass * workspace.Gravity, 0) })
+		make("Sound", p, { SoundId = "rbxasset://sounds/Rocket whoosh 01.wav", Volume = 0.6, Looped = true, Playing = true,
+			RollOffMinDistance = 20, RollOffMaxDistance = 400 })
+	else
+		piece(p, p, "Cylinder", V(0.4, 2.56, 2.56), CFrame.identity, cfg.color, M.Neon, GHOST)    -- полоса на корпусе бомбы
+		piece(p, p, "Block", V(0.2, 1.4, 1.4), CFrame.new(0, 1.5, 0), DARK, M.Metal, GHOST)       -- оперение
+		piece(p, p, "Block", V(1.4, 1.4, 0.2), CFrame.new(0, 1.5, 0), DARK, M.Metal, GHOST)
 	end
-	local drone = round and round.drone
-	local done = false
-	local function boom()
-		if done then return end
-		done = true
-		onHit(p.Position)
-		p:Destroy()
-	end
-	p.Touched:Connect(function(hit)
-		if (drone and hit:IsDescendantOf(drone)) or hit.Name == "Prop" then return end
-		boom()
-	end)
-	task.delay(6, function() if p.Parent then boom() end end)
+
+	local params = RaycastParams.new()
+	params.FilterDescendantsInstances = ignoreList(r, p)
+	params.FilterType = Enum.RaycastFilterType.Exclude
+	table.insert(projectiles, { part = p, cfg = cfg, round = r, last = origin, born = os.clock(),
+		life = rocket and cfg.fuel or 8, dir = velocity.Unit, locked = locked, params = params })
 end
 
-FireEv.OnServerEvent:Connect(function(plr, target)
-	-- принимаем выстрел только от охотника идущего матча; запоздавшие события прошлого раунда отсекаются
-	if not round or not round.active or not round.drone or plr ~= round.hunter then return end
-	if typeof(target) ~= "Vector3" or target ~= target or target.Magnitude > 1e5 then return end -- в т.ч. NaN и бесконечность
-	local cfg = DRONES[round.droneIdx]
-	local now = os.clock()
-	if now - round.lastFire < cfg.cooldown then return end
-	round.lastFire = now
+-- Наведение ракеты: доворачивает к машине не быстрее cfg.turn рад/с.
+-- Если цель ушла из переднего сектора — захват сорван, ракета летит прямо до выгорания топлива.
+local function steer(pr, pos, dt)
+	local r, cfg, dir = pr.round, pr.cfg, pr.dir
+	local body = r.body
+	if pr.locked and r.active and body.Parent then
+		local to = body.Position + body.AssemblyLinearVelocity * 0.2 - pos
+		if to.Magnitude > 1 then
+			local want = to.Unit
+			local angle = math.acos(math.clamp(dir:Dot(want), -1, 1))
+			if angle > cfg.loseAngle then
+				pr.locked = false
+			elseif angle > 1e-3 then
+				dir = dir:Lerp(want, math.min(1, cfg.turn * dt / angle)).Unit
+			end
+		end
+	else
+		pr.locked = false
+	end
+	pr.dir = dir
+	pr.part.AssemblyLinearVelocity = dir * cfg.rocketSpeed
+	pr.part.AssemblyAngularVelocity = Vector3.zero
+	pr.part.CFrame = CFrame.lookAt(pos, pos + dir) * FWD
+end
 
-	local origin = round.drone.Position - Vector3.new(0, round.drone.Size.Y, 0)
+RunService.Heartbeat:Connect(function(dt)
+	local locks = 0
+	for i = #projectiles, 1, -1 do
+		local pr = projectiles[i]
+		local p = pr.part
+		if round ~= pr.round or not p.Parent then -- матч закончился: снаряды прошлого раунда исчезают
+			table.remove(projectiles, i)
+			p:Destroy()
+		else
+			local pos = p.Position
+			local hit = nil
+			local move = pos - pr.last
+			if move.Magnitude > 0.05 then
+				local res = workspace:Raycast(pr.last, move, pr.params)
+				hit = res and res.Position
+				pr.last = pos
+			end
+			if not hit and os.clock() - pr.born > pr.life then hit = pos end -- топливо/взрыватель по времени
+			if hit then
+				table.remove(projectiles, i)
+				p:Destroy()
+				explode(hit, pr.cfg.radius, pr.cfg.dmg, pr.cfg.push)
+			elseif pr.cfg.weapon == "rocket" then
+				steer(pr, pos, dt)
+				if pr.locked then locks = locks + 1 end
+			end
+		end
+	end
+	-- беглец видит предупреждение, пока на него наведена хотя бы одна ракета
+	local car = round and round.car
+	if car and car.Parent and car:GetAttribute("Missiles") ~= locks then car:SetAttribute("Missiles", locks) end
+end)
+
+---------------------------------------------------------------- команды охотника
+FireEv.OnServerEvent:Connect(function(plr, target)
+	local r = round
+	-- принимаем выстрел только от охотника идущего матча; запоздавшие события прошлого раунда отсекаются
+	if not canAct(r, plr) then return end
+	if typeof(target) ~= "Vector3" or target ~= target or target.Magnitude > 1e5 then return end -- в т.ч. NaN и бесконечность
+	updateReload(r)
+	local cfg, st, drone, t = DRONES[r.droneIdx], r.weapons[r.droneIdx], r.drone, now()
+	if t < r.switchEnd or st.reloadEnd then return end
+	if t < st.nextFire - 0.03 then return end -- темп огня; 0.03 с — допуск на сетевой джиттер
+	if st.ammo <= 0 then startReload(r) return end
+
+	-- ограничения: дрон должен быть в зоне полёта и лететь не быстрее положенного
+	local dp = drone.Position
+	if drone.AssemblyLinearVelocity.Magnitude > cfg.speed * 1.5 + 15
+		or dp.Y < FLIGHT.minY - 30 or dp.Y > FLIGHT.maxY + 30
+		or dp.X < FLIGHT.minX - 60 or dp.X > FLIGHT.maxX + 60 or math.abs(dp.Z) > FLIGHT.maxZ + 60 then
+		return
+	end
+
+	local origin = dp - Vector3.new(0, drone.Size.Y, 0)
+	if cfg.weapon == "rocket" then -- ракеты уходят поочерёдно из левого и правого блока
+		r.podSide = -(r.podSide or 1)
+		origin = (drone.CFrame * CFrame.new(r.podSide * 1.25, -0.25, -1.3)).Position
+	end
 	local dir = target - origin
 	if dir.Magnitude < 0.1 then return end
 	dir = dir.Unit
 
+	st.nextFire = math.max(st.nextFire, t - 0.05) + cfg.cooldown
+	st.ammo = st.ammo - 1
+	if st.ammo <= 0 then startReload(r) else drone:SetAttribute("Ammo", st.ammo) end
+
 	if cfg.weapon == "gun" then
+		-- разброс считает сервер
+		dir = (CFrame.lookAt(origin, origin + dir) * CFrame.Angles(rand:NextNumber(-cfg.spread, cfg.spread), rand:NextNumber(-cfg.spread, cfg.spread), 0)).LookVector
 		local params = RaycastParams.new()
-		params.FilterDescendantsInstances = { round.drone, plr.Character }
+		params.FilterDescendantsInstances = ignoreList(r)
 		params.FilterType = Enum.RaycastFilterType.Exclude
-		local res = workspace:Raycast(origin, dir * 400, params)
-		tracer(origin, res and res.Position or origin + dir * 400, cfg.color)
-		if res then hitFx(res.Position, res.Normal) end
-		-- скрытый водитель торчит над крышей: попадание в него тоже считается попаданием в машину
-		local driver = round.runner.Character
-		if res and (res.Instance:IsDescendantOf(round.car) or (driver and res.Instance:IsDescendantOf(driver))) then damageCar(cfg.dmg) end
+		local res = workspace:Raycast(origin, dir * cfg.range, params)
+		tracer(origin, res and res.Position or origin + dir * cfg.range, cfg.color)
+		sfx("shot", origin)
+		if res then
+			hitFx(res.Position, res.Normal)
+			-- скрытый водитель торчит над крышей: попадание в него тоже считается попаданием в машину
+			local driver = r.runner.Character
+			if res.Instance:IsDescendantOf(r.car) or (driver and res.Instance:IsDescendantOf(driver)) then
+				local falloff = 1 - 0.5 * math.clamp((res.Distance - 150) / (cfg.range - 150), 0, 1) -- дальше 150 студов урон падает до 50%
+				local crit = r.body.CFrame:PointToObjectSpace(res.Position).Z < -2.3                  -- моторный отсек
+				damageCar(cfg.dmg * falloff * (crit and cfg.crit or 1), res.Position, crit)
+			end
+		end
 	elseif cfg.weapon == "bomb" then
-		projectile(origin, round.drone.AssemblyLinearVelocity * 0.8, 2.5, cfg.color, function(pos)
-			explode(pos, cfg.radius, cfg.dmg)
-		end, true)
+		projectile(r, cfg, origin, drone.AssemblyLinearVelocity * 0.8, false)
+		sfx("bombDrop", origin)
 	else
-		projectile(origin, dir * 160, 1.4, cfg.color, function(pos)
-			explode(pos, cfg.radius, cfg.dmg)
-		end, false)
+		-- захват: машина в пределах дальности и в конусе вокруг линии прицеливания
+		local to = r.body.Position - origin
+		local locked = to.Magnitude > 1 and to.Magnitude <= cfg.lockRange
+			and math.acos(math.clamp(dir:Dot(to.Unit), -1, 1)) <= cfg.lockCone
+		projectile(r, cfg, origin, dir * cfg.rocketSpeed, locked)
+		launchFx(origin, dir)
+		sfx("rocketLaunch", origin)
+		StateEv:FireClient(plr, "lock", locked)
 	end
 end)
 
+ReloadEv.OnServerEvent:Connect(function(plr)
+	local r = round
+	if not canAct(r, plr) or now() < r.switchEnd then return end
+	updateReload(r)
+	startReload(r)
+end)
+
 SwitchEv.OnServerEvent:Connect(function(plr, idx)
-	if not round or not round.active or not round.drone or plr ~= round.hunter then return end
-	if typeof(idx) ~= "number" or not DRONES[idx] or idx == round.droneIdx then return end
-	local now = os.clock()
-	if now - round.lastSwitch < 0.4 then return end -- смена пересобирает модель: не чаще раза в 0.4 с
-	round.lastSwitch = now
-	round.droneIdx = idx
-	applyDroneType(round.drone, round.vf, idx)
+	local r = round
+	if not canAct(r, plr) then return end
+	if typeof(idx) ~= "number" or not DRONES[idx] or idx == r.droneIdx then return end
+	local t = now()
+	if t < r.switchEnd then return end -- смена пересобирает модель и занимает SWITCH_TIME
+	local old = r.weapons[r.droneIdx]
+	old.reloadStart, old.reloadEnd = nil, nil -- незаконченная перезарядка прерывается
+	r.droneIdx = idx
+	r.switchEnd = t + SWITCH_TIME           -- на время трансформации оружие заблокировано
+	applyDroneType(r.drone, r.vf, idx)
+	syncWeapon(r)
+	if r.weapons[idx].ammo <= 0 then startReload(r, r.switchEnd) end
+	sfx("switch", r.drone.Position)
 	StateEv:FireClient(plr, "cfg", DRONES[idx], idx)
 end)
 
@@ -935,6 +1209,8 @@ end
 local function cleanup(match)
 	local r = round
 	round = nil
+	for _, pr in ipairs(projectiles) do pr.part:Destroy() end -- снаряды не переживают матч
+	table.clear(projectiles)
 	if r then
 		if r.drone then r.drone:Destroy() end
 		if r.car then r.car:Destroy() end
@@ -986,7 +1262,10 @@ function world.setup(match)
 	buildObstacles()
 	local car, body, seat, dust = buildCar()
 	round = { id = match.id, hunter = hunter, runner = runner, car = car, body = body, seat = seat, dust = dust,
-		droneIdx = 1, lastFire = 0, lastSwitch = 0, ticks = 0, active = false }
+		droneIdx = 1, switchEnd = 0, weapons = {}, ticks = 0, active = false }
+	for i, cfg in ipairs(DRONES) do -- у каждого дрона свой магазин
+		round.weapons[i] = { ammo = cfg.mag, nextFire = 0 }
+	end
 
 	local ch, hum = aliveCharacter(runner)
 	if not ch then return false, "Беглец пропал" end
@@ -1003,6 +1282,7 @@ function world.setup(match)
 	placeHunter(round)
 	local drone, vf = buildDrone(hunter)
 	round.drone, round.vf = drone, vf
+	syncWeapon(round)
 	task.wait(0.3) -- дать модели дрона реплицироваться клиенту до команды на управление
 	if not hunter.Parent then return false, "Охотник вышел" end
 	StateEv:FireClient(hunter, "drone", drone, DRONES[1], 1)
@@ -1028,6 +1308,7 @@ function world.tick(match, left)
 	for _, e in ipairs(r.dust) do e.Rate = speed > 12 and speed * 0.35 or 0 end
 
 	seatRunner(r) -- выпавшего из кресла водителя возвращаем за руль
+	if r.drone then updateReload(r) end
 
 	local destroyed = r.car:GetAttribute("HP") <= 0
 	local fell = body.Parent == nil or body.Position.Y < BRIDGE_Y - 20
